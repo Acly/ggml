@@ -210,6 +210,112 @@ static void ggml_backend_blas_out_prod(ggml_backend_blas_context * ctx, struct g
     GGML_UNUSED(ctx);
 }
 
+static int64_t div_up(int64_t x, int64_t multiple) {
+    return (x + multiple - 1) / multiple;
+}
+
+static std::vector<float>& im2col_buffer(int64_t size) {
+    static std::vector<float> buffer;
+    if (buffer.size() < size) {
+        buffer.resize(size);
+    }
+    return buffer;
+}
+
+static void ggml_backend_blas_conv_2d_channels(ggml_backend_blas_context * ctx, ggml_tensor * dest) {
+    const ggml_tensor * src = dest->src[1];
+    const ggml_tensor * filter = dest->src[0];
+
+    const int32_t stride_w = dest->op_params[0];
+    const int32_t stride_h = dest->op_params[1];
+    const int32_t pad = dest->op_params[2];
+
+    const int64_t c = src->ne[0];
+    const int64_t w = src->ne[1];
+    const int64_t h = src->ne[2];
+    const int64_t filter_count = filter->ne[0];
+    const int64_t filter_c = filter->ne[1];
+    const int64_t filter_w = filter->ne[2];
+    const int64_t filter_h = filter->ne[3];
+    const int64_t dest_w = dest->ne[1];
+    const int64_t dest_h = dest->ne[2];
+
+    GGML_ASSERT(filter_w > 1 || filter_h > 1 || stride_w > 1);
+    GGML_ASSERT(pad == 0 || (pad == filter_w / 2 && pad == filter_h / 2));
+
+    int filter_left_offset;
+    int filter_top_offset;
+    if (pad > 0) {
+      filter_left_offset = ((dest_w - 1) * stride_w + filter_w - w + 1) / 2;
+      filter_top_offset = ((dest_h - 1) * stride_h + filter_h - h + 1) / 2;
+    } else {
+      filter_left_offset = ((dest_w - 1) * stride_w + filter_w - w) / 2;
+      filter_top_offset = ((dest_h - 1) * stride_h + filter_h - h) / 2;
+    }
+
+    const int64_t max_chunk_size = 16 * 1024 * 1024;
+    const int64_t filter_value_count = c * filter_w * filter_h;
+    const int64_t patch_count = src->ne[3] * dest_w * dest_h;
+    const int64_t patches_per_chunk = max_chunk_size / (filter_value_count * sizeof(float));
+    const int64_t chunk_value_count = div_up(max_chunk_size, sizeof(float));
+    const int64_t chunk_count = div_up(patch_count, patches_per_chunk);
+    float * tmp = im2col_buffer(chunk_value_count).data();
+
+    for (int64_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
+        const int64_t patch_start = chunk_index * patches_per_chunk;
+        const int64_t patch_end = std::min(patch_start + patches_per_chunk, patch_count);
+        for (int64_t patch_index = patch_start; patch_index < patch_end; ++patch_index) {
+            const int64_t batch = patch_index / (dest_w * dest_h);
+            const int64_t dest_y = (patch_index / dest_w) % dest_h;
+            const int64_t dest_x = patch_index % dest_w;
+            const float * src_patch_start = (const float*)src->data + (batch * c * w * h);
+            const int src_y_origin = dest_y * stride_h - filter_top_offset;
+            const int src_x_origin = dest_x * stride_w - filter_left_offset;
+            const int patch_i = patch_index % patches_per_chunk;
+            float * tmp_patch_start = tmp + (patch_i * filter_value_count);
+            for (int filter_y = 0; filter_y < filter_h; ++filter_y) {
+                const int src_y = src_y_origin + filter_y;
+                float * tmp_row_start = tmp_patch_start + (filter_y * filter_w * c);
+
+                if (src_y < 0 || src_y >= h) {
+                    // Top/bottom fill
+                    float * tmp_row_end = tmp_row_start + (filter_w * c);
+                    std::fill(tmp_row_start, tmp_row_end, 0.0f);
+                } else {
+                    // Row fill
+                    const int src_x_end = src_x_origin + filter_w;
+                    const int left_zero_count = std::max(0, -src_x_origin);
+                    const int right_zero_count = std::max(0, src_x_end - (int)w);
+                    const int center_copy_count = filter_w - left_zero_count - right_zero_count;
+                    if (left_zero_count > 0) {
+                        std::fill(tmp_row_start, tmp_row_start + (left_zero_count * c), 0.0f);
+                    }
+                    if (center_copy_count > 0) {
+                        const float * src_start = src_patch_start + (src_y * w * c) + std::max(0, src_x_origin) * c;
+                        const float * src_end = src_start + (center_copy_count * c);
+                        float * tmp_start = tmp_row_start + (left_zero_count * c);
+                        std::copy(src_start, src_end, tmp_start);
+                    }
+                    if (right_zero_count > 0) {
+                        float * right_start = tmp_row_start + ((left_zero_count + center_copy_count) * c);
+                        float * right_end = right_start + (right_zero_count * c);
+                        std::fill(right_start, right_end, 0.0f);
+                    }
+                }
+            }
+        } // for each patch
+
+        const int m = patch_end - patch_start;
+        const int n = filter_count;
+        const int k = filter_value_count;
+        float * dest_chunk_data = (float *)dest->data + (patch_start * filter_count);
+        const float * filter_data = (const float *)filter->data;
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    m, n, k, 1.0f, tmp, k, filter_data, n, 0.0f, dest_chunk_data, n);
+
+    } // for each chunk    
+}
+
 // backend interface
 
 static const char * ggml_backend_blas_get_name(ggml_backend_t backend) {
@@ -237,6 +343,10 @@ static enum ggml_status ggml_backend_blas_graph_compute(ggml_backend_t backend, 
 
             case GGML_OP_OUT_PROD:
                 ggml_backend_blas_out_prod(ctx, node);
+                break;
+
+            case GGML_OP_CONV_2D_CONT_CHANNELS:
+                ggml_backend_blas_conv_2d_channels(ctx, node);
                 break;
 
             case GGML_OP_NONE:
@@ -413,7 +523,8 @@ static bool ggml_backend_blas_device_supports_op(ggml_backend_dev_t dev, const s
             return ggml_is_contiguous(src0) &&
                    ggml_is_contiguous(src1) &&
                    src1->type == GGML_TYPE_F32 &&
-                   (ne0 >= min_batch && ne1 >= min_batch && ne10 >= min_batch) &&
+                   ne0*ne1 >= min_batch*min_batch &&
+                //    (ne0 >= min_batch && ne1 >= min_batch && ne10 >= min_batch) &&
                    (src0->type == GGML_TYPE_F32 || ggml_get_type_traits(src0->type)->to_float != NULL);
         }
 
@@ -425,6 +536,10 @@ static bool ggml_backend_blas_device_supports_op(ggml_backend_dev_t dev, const s
                    ggml_is_contiguous(src0) &&
                    (ggml_is_contiguous(src1) || ggml_is_transposed(src1)) &&
                    (src0->type == GGML_TYPE_F32 || ggml_get_type_traits(src0->type)->to_float != NULL);
+
+        case GGML_OP_CONV_2D_CONT_CHANNELS:
+            return true;
+
 
         default:
             return false;
