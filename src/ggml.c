@@ -4016,6 +4016,37 @@ struct ggml_tensor * ggml_conv_2d(
     return result;
 }
 
+// ggml_conv_2d_cont_channels
+struct ggml_tensor * ggml_conv_2d_cont_channels(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        int                   s0,
+        int                   s1,
+        int                   pad) {
+
+    GGML_ASSERT(a->ne[1] == b->ne[0]);
+    
+    const int64_t ne[4] = {
+        a->ne[0],
+        ggml_calc_conv_output_size(b->ne[1], a->ne[2], s0, pad, 1),
+        ggml_calc_conv_output_size(b->ne[2], a->ne[3], s1, pad, 1),
+        b->ne[3]
+    };
+
+    struct ggml_tensor * result = ggml_new_tensor(ctx, b->type, 4, ne);
+
+    int32_t params[] = { s0, s1, pad };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_CONV_2D_CONT_CHANNELS;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+        
+
 // ggml_conv_2d_sk_p0
 
 struct ggml_tensor * ggml_conv_2d_sk_p0(

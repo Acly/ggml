@@ -2275,6 +2275,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_CONV_2D_DW:
         case GGML_OP_CONV_TRANSPOSE_1D:
         case GGML_OP_CONV_TRANSPOSE_2D:
+        case GGML_OP_CONV_2D_CONT_CHANNELS:
             {
                 n_tasks = n_threads;
             } break;
