@@ -230,6 +230,7 @@ void ggml_abort(const char * file, int line, const char * fmt, ...) {
         ggml_print_backtrace();
     }
 
+    __debugbreak();
     abort();
 }
 
