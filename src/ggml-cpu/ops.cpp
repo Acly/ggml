@@ -3591,6 +3591,52 @@ void ggml_compute_forward_l2_norm(
     }
 }
 
+// ggml_compute_forward_batch_norm
+
+static void ggml_compute_forward_batch_norm(
+    const struct ggml_compute_params * params,
+    struct ggml_tensor * dst) {
+
+    const struct ggml_tensor * src = dst->src[0];
+    const struct ggml_tensor * mean = dst->src[1];
+    const struct ggml_tensor * variance = dst->src[2];
+    const struct ggml_tensor * weight = dst->src[3];
+    const struct ggml_tensor * bias = dst->src[4];
+
+    int64_t n = src->ne[1] * src->ne[2] * src->ne[3];
+    int64_t c = src->ne[0];
+    int64_t steps = (c + GGML_F32_STEP - 1) / GGML_F32_STEP;
+    int64_t steps_end = steps * GGML_F32_STEP;
+    int64_t steps_rest = c - steps_end;
+
+    int64_t chunk = (n + params->nth - 1) / params->nth;
+    int64_t start = params->ith * chunk;
+    int64_t end = MIN(start + chunk, n);
+
+    const float * mean_data = (const float *)mean->data;
+    const float * variance_data = (const float *)variance->data;
+    const float * weight_data = (const float *)weight->data;
+    const float * bias_data = (const float *)bias->data;    
+
+    for (int64_t i = start; i < end; ++i) {
+        float const* src_data = (float const*)((char const*)src->data + i * src->nb[1]);
+        float * dst_data = (float*)((char*)dst->data + i * dst->nb[1]);
+        
+        for (int64_t p = 0; p < steps_end; p += GGML_F32_STEP) {
+            ggml_vec_sub_f32(GGML_F32_STEP, dst_data + p, src_data + p, mean_data + p);
+            ggml_vec_div_f32(GGML_F32_STEP, dst_data + p, dst_data + p, variance_data + p);
+            ggml_vec_mul_f32(GGML_F32_STEP, dst_data + p, dst_data + p, weight_data + p);
+            ggml_vec_add_f32(GGML_F32_STEP, dst_data + p, dst_data + p, bias_data + p);
+        }
+        if (steps_rest > 0) {
+            ggml_vec_sub_f32(steps_rest, dst_data + steps_end, src_data + steps_end, mean_data + steps_end);
+            ggml_vec_div_f32(steps_rest, dst_data + steps_end, dst_data + steps_end, variance_data + steps_end);
+            ggml_vec_mul_f32(steps_rest, dst_data + steps_end, dst_data + steps_end, weight_data + steps_end);
+            ggml_vec_add_f32(steps_rest, dst_data + steps_end, dst_data + steps_end, bias_data + steps_end);
+        }
+    }
+}
+
 // ggml_compute_forward_out_prod
 
 static void ggml_compute_forward_out_prod_f32(

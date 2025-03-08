@@ -455,6 +455,7 @@ extern "C" {
         GGML_OP_RMS_NORM_BACK,
         GGML_OP_GROUP_NORM,
         GGML_OP_L2_NORM,
+        GGML_OP_BATCH_NORM,
 
         GGML_OP_MUL_MAT,
         GGML_OP_MUL_MAT_ID,
@@ -1107,6 +1108,15 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             float                 eps);
+            
+    // ((a - mean) / sqrt_var_eps) * weight + bias
+    GGML_API struct ggml_tensor * ggml_batch_norm_inplace(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * mean,         // running_mean
+            struct ggml_tensor  * sqrt_var_eps, // sqrt(running_var + eps)
+            struct ggml_tensor  * weight,
+            struct ggml_tensor  * bias);
 
     // a - x
     // b - dy
