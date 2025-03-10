@@ -455,7 +455,7 @@ extern "C" {
         GGML_OP_RMS_NORM_BACK,
         GGML_OP_GROUP_NORM,
         GGML_OP_L2_NORM,
-        GGML_OP_BATCH_NORM,
+        GGML_OP_BATCH_NORM_2D,
 
         GGML_OP_MUL_MAT,
         GGML_OP_MUL_MAT_ID,
@@ -482,6 +482,7 @@ extern "C" {
         GGML_OP_CONV_TRANSPOSE_1D,
         GGML_OP_IM2COL,
         GGML_OP_IM2COL_BACK,
+        GGML_OP_CONV_2D,
         GGML_OP_CONV_2D_DW,
         GGML_OP_CONV_TRANSPOSE_2D,
         GGML_OP_POOL_1D,
@@ -1114,7 +1115,7 @@ extern "C" {
             float                 eps);
             
     // ((a - mean) / sqrt_var_eps) * weight + bias
-    GGML_API struct ggml_tensor * ggml_batch_norm_inplace(
+    GGML_API struct ggml_tensor * ggml_batch_norm_2d_inplace(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             struct ggml_tensor  * mean,         // running_mean
@@ -1651,14 +1652,6 @@ extern "C" {
             int                   p1,  // padding dimension 1
             int                   d0,  // dilation dimension 0
             int                   d1); // dilation dimension 1
-
-    GGML_API struct ggml_tensor * ggml_conv_2d_cont_channels(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * a,   // convolution kernel
-            struct ggml_tensor  * b,   // data
-            int                   s0,  // stride dimension 0
-            int                   s1,  // stride dimension 1
-            int                   pad);// padding = 0 or kernel_size / 2
 
     // kernel size is a->ne[0] x a->ne[1]
     // stride is equal to kernel size

@@ -210,109 +210,118 @@ static void ggml_backend_blas_out_prod(ggml_backend_blas_context * ctx, struct g
     GGML_UNUSED(ctx);
 }
 
-static int64_t div_up(int64_t x, int64_t multiple) {
+namespace {
+
+int64_t div_up(int64_t x, int64_t multiple) {
     return (x + multiple - 1) / multiple;
 }
 
-static std::vector<float>& im2col_buffer(int64_t size) {
-    static std::vector<float> buffer;
-    if (buffer.size() < size) {
-        buffer.resize(size);
+float * work_data_f32(ggml_backend_blas_context * ctx, int64_t num_elements) {
+    int64_t size = num_elements * sizeof(float);
+    if (size > ctx->work_size) {
+        ctx->work_data.reset(new char[size]);
+        ctx->work_size = size;
     }
-    return buffer;
+    return (float *) ctx->work_data.get();
 }
 
-static void ggml_backend_blas_conv_2d_channels(ggml_backend_blas_context * ctx, ggml_tensor * dest) {
-    const ggml_tensor * src = dest->src[1];
-    const ggml_tensor * filter = dest->src[0];
+} // namespace
 
-    const int32_t stride_w = dest->op_params[0];
-    const int32_t stride_h = dest->op_params[1];
-    const int32_t pad = dest->op_params[2];
+static void ggml_backend_blas_conv_2d(ggml_backend_blas_context * ctx, ggml_tensor * dst) {
+    const ggml_tensor * src = dst->src[1];
+    const ggml_tensor * kernel = dst->src[0];
 
-    const int64_t c = src->ne[0];
-    const int64_t w = src->ne[1];
-    const int64_t h = src->ne[2];
-    const int64_t filter_count = filter->ne[0];
-    const int64_t filter_c = filter->ne[1];
-    const int64_t filter_w = filter->ne[2];
-    const int64_t filter_h = filter->ne[3];
-    const int64_t dest_w = dest->ne[1];
-    const int64_t dest_h = dest->ne[2];
+    const int32_t stride_x = dst->op_params[0];
+    const int32_t stride_y = dst->op_params[1];
+    const int32_t pad_x = dst->op_params[2];
+    const int32_t pad_y = dst->op_params[3];
 
-    GGML_ASSERT(filter_w > 1 || filter_h > 1 || stride_w > 1);
-    GGML_ASSERT(pad == 0 || (pad == filter_w / 2 && pad == filter_h / 2));
+    const int64_t c = src->ne[0]; // number of input channels
+    GGML_ASSERT(c == kernel->ne[1]);
+    const int64_t src_w = src->ne[1];
+    const int64_t src_h = src->ne[2];
+    const float * src_data = (const float *)src->data;
+    const int64_t knl_count = kernel->ne[0]; // number of kernels / output channels
+    const int64_t knl_w = kernel->ne[2];
+    const int64_t knl_h = kernel->ne[3];
+    const float * knl_data = (const float *)kernel->data;
+    const int64_t dst_w = dst->ne[1];
+    const int64_t dst_h = dst->ne[2];
+    float       * dst_data = (float *)dst->data;
 
-    int filter_left_offset;
-    int filter_top_offset;
-    if (pad > 0) {
-      filter_left_offset = ((dest_w - 1) * stride_w + filter_w - w + 1) / 2;
-      filter_top_offset = ((dest_h - 1) * stride_h + filter_h - h + 1) / 2;
-    } else {
-      filter_left_offset = ((dest_w - 1) * stride_w + filter_w - w) / 2;
-      filter_top_offset = ((dest_h - 1) * stride_h + filter_h - h) / 2;
+    // Handle 1x1 convolutions with stride 1 -> use gemm directly
+    if (knl_w == 1 && knl_h == 1 && stride_x == 1 && stride_y == 1) {
+        int m = dst->ne[3] * dst_w * dst_h;
+        int n = knl_count;
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    m, n, c, 1.0f, src_data, c, knl_data, n, 0.0f, dst_data, n);
+        return;
     }
 
+    // Rewrite the convolution as a matrix multiplication (im2col)
+    // uses some parts from tensorflow's implementation
+    // https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/kernels/conv_ops_using_gemm.cc
+    GGML_ASSERT(knl_w > 1 || knl_h > 1 || stride_x > 1);
+    GGML_ASSERT(pad_x == 0 || pad_x == knl_w / 2);
+    GGML_ASSERT(pad_y == 0 || pad_y == knl_h / 2);
+
+    int knl_left_offset = (dst_w - 1) * stride_x + knl_w - src_w;
+    int knl_top_offset = (dst_h - 1) * stride_y + knl_h - src_h;
+    knl_left_offset = pad_x > 0 ? (knl_left_offset + 1) / 2 : knl_left_offset / 2;
+    knl_top_offset = pad_y > 0 ? (knl_top_offset + 1) / 2 : knl_top_offset / 2;
+
     const int64_t max_chunk_size = 16 * 1024 * 1024;
-    const int64_t filter_value_count = c * filter_w * filter_h;
-    const int64_t patch_count = src->ne[3] * dest_w * dest_h;
-    const int64_t patches_per_chunk = max_chunk_size / (filter_value_count * sizeof(float));
-    const int64_t chunk_value_count = div_up(max_chunk_size, sizeof(float));
-    const int64_t chunk_count = div_up(patch_count, patches_per_chunk);
-    float * tmp = im2col_buffer(chunk_value_count).data();
+    const int64_t knl_n = c * knl_w * knl_h;
+    const int64_t patch_n = dst->ne[3] * dst_w * dst_h;
+    const int64_t patches_per_chunk = max_chunk_size / (knl_n * sizeof(float));
+    const int64_t values_per_chunk = div_up(max_chunk_size, sizeof(float));
+    const int64_t chunk_n = div_up(patch_n, patches_per_chunk);
+    float * tmp = work_data_f32(ctx, values_per_chunk); // for im2col result
 
-    for (int64_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
-        const int64_t patch_start = chunk_index * patches_per_chunk;
-        const int64_t patch_end = std::min(patch_start + patches_per_chunk, patch_count);
-        for (int64_t patch_index = patch_start; patch_index < patch_end; ++patch_index) {
-            const int64_t batch = patch_index / (dest_w * dest_h);
-            const int64_t dest_y = (patch_index / dest_w) % dest_h;
-            const int64_t dest_x = patch_index % dest_w;
-            const float * src_patch_start = (const float*)src->data + (batch * c * w * h);
-            const int src_y_origin = dest_y * stride_h - filter_top_offset;
-            const int src_x_origin = dest_x * stride_w - filter_left_offset;
-            const int patch_i = patch_index % patches_per_chunk;
-            float * tmp_patch_start = tmp + (patch_i * filter_value_count);
-            for (int filter_y = 0; filter_y < filter_h; ++filter_y) {
-                const int src_y = src_y_origin + filter_y;
-                float * tmp_row_start = tmp_patch_start + (filter_y * filter_w * c);
+    for (int64_t chunk_i = 0; chunk_i < chunk_n; ++chunk_i) {
+        const int64_t patch_start = chunk_i * patches_per_chunk;
+        const int64_t patch_end = std::min(patch_start + patches_per_chunk, patch_n);
 
-                if (src_y < 0 || src_y >= h) {
-                    // Top/bottom fill
-                    float * tmp_row_end = tmp_row_start + (filter_w * c);
-                    std::fill(tmp_row_start, tmp_row_end, 0.0f);
+        for (int64_t patch_i = patch_start; patch_i < patch_end; ++patch_i) {
+            const int64_t batch = patch_i / (dst_w * dst_h);
+            const int64_t dst_y = (patch_i / dst_w) % dst_h;
+            const int64_t dst_x = patch_i % dst_w;
+            const float * src_patch = (const float*)src->data + (batch * c * src_w * src_h);
+            const int64_t src_y_origin = dst_y * stride_y - knl_top_offset;
+            const int64_t src_x_origin = dst_x * stride_x - knl_left_offset;
+            float * tmp_patch = tmp + ((patch_i % patches_per_chunk) * knl_n);
+
+            for (int64_t knl_y = 0; knl_y < knl_h; ++knl_y) {
+                const int64_t src_y = src_y_origin + knl_y;
+                float * tmp_row = tmp_patch + (knl_y * knl_w * c);
+
+                if (src_y < 0 || src_y >= src_h) {
+                    memset(tmp_row, 0, knl_w * c * sizeof(float));
                 } else {
-                    // Row fill
-                    const int src_x_end = src_x_origin + filter_w;
-                    const int left_zero_count = std::max(0, -src_x_origin);
-                    const int right_zero_count = std::max(0, src_x_end - (int)w);
-                    const int center_copy_count = filter_w - left_zero_count - right_zero_count;
-                    if (left_zero_count > 0) {
-                        std::fill(tmp_row_start, tmp_row_start + (left_zero_count * c), 0.0f);
+                    const int64_t pad_left = std::max(0i64, -src_x_origin);
+                    const int64_t pad_right = std::max(0i64, src_x_origin + knl_w - src_w);
+                    const int64_t center = knl_w - pad_left - pad_right;
+                    if (pad_left > 0) {
+                        memset(tmp_row, 0, pad_left * c * sizeof(float));
                     }
-                    if (center_copy_count > 0) {
-                        const float * src_start = src_patch_start + (src_y * w * c) + std::max(0, src_x_origin) * c;
-                        const float * src_end = src_start + (center_copy_count * c);
-                        float * tmp_start = tmp_row_start + (left_zero_count * c);
-                        std::copy(src_start, src_end, tmp_start);
+                    if (center > 0) {
+                        const int64_t src_x = std::max(0i64, src_x_origin);
+                        const float * src_start = src_patch + (src_y * src_w + src_x) * c;
+                        memcpy(tmp_row + pad_left * c, src_start, center * c * sizeof(float));
                     }
-                    if (right_zero_count > 0) {
-                        float * right_start = tmp_row_start + ((left_zero_count + center_copy_count) * c);
-                        float * right_end = right_start + (right_zero_count * c);
-                        std::fill(right_start, right_end, 0.0f);
+                    if (pad_right > 0) {
+                        memset(tmp_row + (pad_left + center) * c, 0, pad_right * c * sizeof(float));
                     }
                 }
             }
         } // for each patch
 
-        const int m = patch_end - patch_start;
-        const int n = filter_count;
-        const int k = filter_value_count;
-        float * dest_chunk_data = (float *)dest->data + (patch_start * filter_count);
-        const float * filter_data = (const float *)filter->data;
+        int m = patch_end - patch_start;
+        int n = knl_count;
+        int k = knl_n;
+        float * dst_chunk_data = dst_data + patch_start * knl_count;
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    m, n, k, 1.0f, tmp, k, filter_data, n, 0.0f, dest_chunk_data, n);
-
+                    m, n, k, 1.0f, tmp, k, knl_data, n, 0.0f, dst_chunk_data, n);
     } // for each chunk    
 }
 
@@ -345,8 +354,8 @@ static enum ggml_status ggml_backend_blas_graph_compute(ggml_backend_t backend, 
                 ggml_backend_blas_out_prod(ctx, node);
                 break;
 
-            case GGML_OP_CONV_2D_CONT_CHANNELS:
-                ggml_backend_blas_conv_2d_channels(ctx, node);
+            case GGML_OP_CONV_2D:
+                ggml_backend_blas_conv_2d(ctx, node);
                 break;
 
             case GGML_OP_NONE:
@@ -537,7 +546,7 @@ static bool ggml_backend_blas_device_supports_op(ggml_backend_dev_t dev, const s
                    (ggml_is_contiguous(src1) || ggml_is_transposed(src1)) &&
                    (src0->type == GGML_TYPE_F32 || ggml_get_type_traits(src0->type)->to_float != NULL);
 
-        case GGML_OP_CONV_2D_CONT_CHANNELS:
+        case GGML_OP_CONV_2D:
             return true;
 
 
