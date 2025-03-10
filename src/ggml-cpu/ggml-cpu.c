@@ -1827,9 +1827,9 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_l2_norm(params, tensor);
             } break;
-        case GGML_OP_BATCH_NORM:
+        case GGML_OP_BATCH_NORM_2D:
             {
-                ggml_compute_forward_batch_norm(params, tensor);
+                ggml_compute_forward_batch_norm_2d(params, tensor);
             } break;
         case GGML_OP_MUL_MAT:
             {
@@ -1926,6 +1926,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         case GGML_OP_IM2COL_BACK:
             {
                 ggml_compute_forward_im2col_back_f32(params, tensor);
+            } break;
+        case GGML_OP_CONV_2D:
+            {
+                ggml_compute_forward_conv_2d_cwhn(params, tensor);
             } break;
         case GGML_OP_CONV_2D_DW:
             {
@@ -2223,7 +2227,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_RMS_NORM_BACK:
         case GGML_OP_L2_NORM:
         case GGML_OP_GROUP_NORM:
-        case GGML_OP_BATCH_NORM:
+        case GGML_OP_BATCH_NORM_2D:
         case GGML_OP_CONCAT:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
@@ -2268,10 +2272,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
             } break;
         case GGML_OP_IM2COL:
         case GGML_OP_IM2COL_BACK:
-        case GGML_OP_CONV_2D_DW:
         case GGML_OP_CONV_TRANSPOSE_1D:
         case GGML_OP_CONV_TRANSPOSE_2D:
-        case GGML_OP_CONV_2D_CONT_CHANNELS:
+        case GGML_OP_CONV_2D:
+        case GGML_OP_CONV_2D_DW:
             {
                 n_tasks = n_threads;
             } break;
@@ -2737,6 +2741,15 @@ struct ggml_cplan ggml_graph_plan(
                 case GGML_OP_ROPE_BACK:
                     {
                         cur = ggml_type_size(GGML_TYPE_F32) * node->ne[0] * n_tasks;
+                    } break;
+                case GGML_OP_CONV_2D:
+                    {
+                        // const struct ggml_tensor * k = node->src[0];
+                        // const int64_t values = k->ne[0] * k->ne[1] * k->ne[2];
+                        // const int64_t patches = node->ne[0] * node->ne[1] * node->ne[3];
+                        // const int64_t im2col_size = patches * values * sizeof(float);
+                        // cur = MIN(im2col_size, GGML_IM2COL_WORK_SIZE);
+                        cur = GGML_IM2COL_WORK_SIZE;
                     } break;
                 case GGML_OP_CONV_TRANSPOSE_1D:
                     {
