@@ -931,7 +931,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "RMS_NORM_BACK",
     "GROUP_NORM",
     "L2_NORM",
-    "BATCH_NORM",
+    "BATCH_NORM_2D",
 
     "MUL_MAT",
     "MUL_MAT_ID",
@@ -958,6 +958,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "CONV_TRANSPOSE_1D",
     "IM2COL",
     "IM2COL_BACK",
+    "CONV_2D",
     "CONV_2D_DW",
     "CONV_TRANSPOSE_2D",
     "POOL_1D",
@@ -1054,6 +1055,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "conv_transpose_1d(x)",
     "im2col(x)",
     "im2col_back(x)",
+    "conv_2d(x)",
     "conv_2d_dw(x)",
     "conv_transpose_2d(x)",
     "pool_1d(x)",
@@ -2731,7 +2733,7 @@ struct ggml_tensor * ggml_l2_norm_inplace(
 
 // ggml_batch_norm_2d
 
-struct ggml_tensor * ggml_batch_norm_inplace(
+struct ggml_tensor * ggml_batch_norm_2d_inplace(
         struct ggml_context * ctx,
         struct ggml_tensor * a,
         struct ggml_tensor * mean,
@@ -2739,7 +2741,7 @@ struct ggml_tensor * ggml_batch_norm_inplace(
         struct ggml_tensor * weight,
         struct ggml_tensor * bias) {
     struct ggml_tensor * result = ggml_view_tensor(ctx, a);
-    result->op = GGML_OP_BATCH_NORM;
+    result->op = GGML_OP_BATCH_NORM_2D;
     result->src[0] = a;
     result->src[1] = mean;
     result->src[2] = variance;
@@ -4024,50 +4026,47 @@ struct ggml_tensor * ggml_conv_2d(
         int                   p1,
         int                   d0,
         int                   d1) {
-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, true, a->type); // [N, OH, OW, IC * KH * KW]
 
-    struct ggml_tensor * result =
-        ggml_mul_mat(ctx,
-                ggml_reshape_2d(ctx, im2col, im2col->ne[0],  im2col->ne[3] * im2col->ne[2] * im2col->ne[1]), // [N, OH, OW, IC * KH * KW] => [N*OH*OW, IC * KH * KW]
-                ggml_reshape_2d(ctx, a, (a->ne[0] * a->ne[1] * a->ne[2]),  a->ne[3]));                       // [OC，IC, KH, KW] => [OC, IC * KH * KW]
+    if (ggml_is_contiguous(b)) {
+        struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, true, a->type); // [N, OH, OW, IC * KH * KW]
 
-    result = ggml_reshape_4d(ctx, result, im2col->ne[1], im2col->ne[2], im2col->ne[3], a->ne[3]); // [OC, N, OH, OW]
-    result = ggml_cont(ctx, ggml_permute(ctx, result, 0, 1, 3, 2)); // [N, OC, OH, OW]
+        struct ggml_tensor * result =
+            ggml_mul_mat(ctx,
+                    ggml_reshape_2d(ctx, im2col, im2col->ne[0],  im2col->ne[3] * im2col->ne[2] * im2col->ne[1]), // [N, OH, OW, IC * KH * KW] => [N*OH*OW, IC * KH * KW]
+                    ggml_reshape_2d(ctx, a, (a->ne[0] * a->ne[1] * a->ne[2]),  a->ne[3]));                       // [OC，IC, KH, KW] => [OC, IC * KH * KW]
 
+        result = ggml_reshape_4d(ctx, result, im2col->ne[1], im2col->ne[2], im2col->ne[3], a->ne[3]); // [OC, N, OH, OW]
+        result = ggml_cont(ctx, ggml_permute(ctx, result, 0, 1, 3, 2)); // [N, OC, OH, OW]
+        return result;
 
-    return result;
+    } else if (ggml_is_contiguous_channels(b)) {
+        // Memory layout of input b:  [N,  IH, IW, IC], permuted to [N,  IC, IH, IW]
+        // Memory layout of result:   [N,  OH, OW, OC], permuted to [N,  OC, OH, OW]
+        // Memory layout of kernel a: [OC, KH, KW, IC], permuted to [OC, IC, KH, KW]
+        const int64_t type_size = ggml_type_size(b->type);
+        GGML_ASSERT(ggml_blck_size(b->type) == 1);
+
+        const int64_t ne[4] = {
+            ggml_calc_conv_output_size(b->ne[0], a->ne[0], s0, p0, d0),
+            ggml_calc_conv_output_size(b->ne[1], a->ne[1], s1, p1, d1),
+            a->ne[3],
+            b->ne[3]
+        };
+        struct ggml_tensor * result = ggml_new_tensor(ctx, b->type, 4, ne);
+        result->nb[0] = result->ne[2] * type_size;
+        result->nb[1] = result->ne[0] * result->nb[0];
+        result->nb[2] = type_size;
+
+        int32_t params[] = { s0, s1, p0, p1, d0, d1 };
+        ggml_set_op_params(result, params, sizeof(params));
+
+        result->op     = GGML_OP_CONV_2D;
+        result->src[0] = a;
+        result->src[1] = b;
+        return result;
+    }
+    GGML_ABORT("ggml_conv_2d: unsupported memory layout");
 }
-
-// ggml_conv_2d_cont_channels
-struct ggml_tensor * ggml_conv_2d_cont_channels(
-        struct ggml_context * ctx,
-        struct ggml_tensor  * a,
-        struct ggml_tensor  * b,
-        int                   s0,
-        int                   s1,
-        int                   pad) {
-
-    GGML_ASSERT(a->ne[1] == b->ne[0]);
-    
-    const int64_t ne[4] = {
-        a->ne[0],
-        ggml_calc_conv_output_size(b->ne[1], a->ne[2], s0, pad, 1),
-        ggml_calc_conv_output_size(b->ne[2], a->ne[3], s1, pad, 1),
-        b->ne[3]
-    };
-
-    struct ggml_tensor * result = ggml_new_tensor(ctx, b->type, 4, ne);
-
-    int32_t params[] = { s0, s1, pad };
-    ggml_set_op_params(result, params, sizeof(params));
-
-    result->op     = GGML_OP_CONV_2D_CONT_CHANNELS;
-    result->src[0] = a;
-    result->src[1] = b;
-
-    return result;
-}
-        
 
 // ggml_conv_2d_sk_p0
 
