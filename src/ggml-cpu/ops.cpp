@@ -7033,6 +7033,91 @@ static void ggml_compute_forward_conv_2d_impl(const ggml_compute_params * params
     }
 }
 
+
+static void ggml_compute_forward_conv_2d_cwhn(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    const ggml_tensor * src = dst->src[1];
+    const ggml_tensor * kernel = dst->src[0];
+    GGML_ASSERT(ggml_is_contiguous_channels(src));    // [C_in W H N] in memory
+    GGML_ASSERT(ggml_is_contiguous_channels(kernel)   // [C_in W H C_out] in memory
+            || kernel->ne[0] == 1 && kernel->ne[1] == 1);
+
+    const int32_t stride_x = dst->op_params[0];
+    const int32_t stride_y = dst->op_params[1];
+    const int32_t pad_x    = dst->op_params[2];
+    const int32_t pad_y    = dst->op_params[3];
+
+    const int64_t c_in  = src->ne[2];    // number of input channels
+    const int64_t c_out = kernel->ne[3]; // number of kernels / output channels
+    GGML_ASSERT(c_in == kernel->ne[2]);
+    const int64_t src_w = src->ne[0];
+    const int64_t src_h = src->ne[1];
+          float * src_data = (float *)src->data;
+    const int64_t knl_w = kernel->ne[0];
+    const int64_t knl_h = kernel->ne[1];
+          float * knl_data = (float *)kernel->data;
+    const int64_t dst_w = dst->ne[0];
+    const int64_t dst_h = dst->ne[1];
+          float * dst_data = (float *)dst->data;
+
+    // Handle 1x1 convolutions with stride 1
+    if (knl_w == 1 && knl_h == 1 && stride_x == 1 && stride_y == 1) {
+        int m = dst->ne[3] * dst_w * dst_h;
+        ggml_call_mul_mat(GGML_TYPE_F32, params, m, c_out, c_in, src_data, knl_data, dst_data);
+        return;
+    }
+
+    // Rewrite the convolution as a matrix multiplication (im2col)
+    const int64_t knl_n = c_in * knl_w * knl_h;
+    const int64_t patch_total = dst->ne[3] * dst_w * dst_h;
+    const int64_t patches_per_batch = GGML_IM2COL_WORK_SIZE / (knl_n * sizeof(float));
+    const int64_t batch_n = (patch_total + patches_per_batch - 1) / patches_per_batch;
+
+    GGML_ASSERT(params->wsize >= MIN(patch_total * knl_n * sizeof(float), GGML_IM2COL_WORK_SIZE));
+    float * tmp = (float *)params->wdata; // temporary buffer for im2col result
+
+    for (int64_t batch_i = 0; batch_i < batch_n; ++batch_i) {
+        const int64_t batch_start = batch_i * patches_per_batch;
+        const int64_t batch_end = MIN(batch_start + patches_per_batch, patch_total);
+        const int64_t patch_n = batch_end - batch_start;
+        const int64_t patch_per_thread = (patch_n + params->nth - 1) / params->nth;
+        const int64_t patch_start = batch_start + params->ith * patch_per_thread;
+        const int64_t patch_end = MIN(patch_start + patch_per_thread, batch_end);
+
+        for (int64_t patch_i = patch_start; patch_i < patch_end; ++patch_i) {
+            const int64_t b = patch_i / (dst_w * dst_h);
+            const int64_t dst_y = (patch_i / dst_w) % dst_h;
+            const int64_t dst_x = patch_i % dst_w;
+            const float * src_patch = (const float*)src->data + (b * src_w * src_h * c_in);
+            float * tmp_patch = tmp + ((patch_i % patches_per_batch) * knl_n);
+
+            for (int64_t knl_y = 0; knl_y < knl_h; ++knl_y) {
+                float * tmp_row = tmp_patch + (knl_y * knl_w * c_in);
+                const int64_t src_y = dst_y * stride_y + knl_y - pad_y;
+                if (src_y < 0 || src_y >= src_h) {
+                    ggml_vec_set_f32(knl_w * c_in, tmp_row, 0);
+                } else {
+                    const int64_t src_x = dst_x * stride_x - pad_x;
+                    const int64_t left = MAX(0, -src_x);
+                    const int64_t right = MAX(0, src_x + knl_w - src_w);
+                    const int64_t center = knl_w - left - right;
+                    const float * src_start = src_patch + (src_y * src_w + src_x + left) * c_in;
+
+                    ggml_vec_set_f32(left * c_in, tmp_row, 0);
+                    ggml_vec_cpy_f32(center * c_in, tmp_row + left * c_in, src_start);
+                    ggml_vec_set_f32(right * c_in, tmp_row + (left + center) * c_in, 0);
+                }
+            }
+        } // for each patch
+        ggml_barrier(params->threadpool);
+
+        float * dst_data_offset = dst_data + batch_start * c_out;
+        ggml_call_mul_mat(GGML_TYPE_F32, params, patch_n, c_out, knl_n, tmp, knl_data, dst_data_offset);
+    } // for each batch
+}
+
 void ggml_compute_forward_conv_2d(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
@@ -7040,7 +7125,11 @@ void ggml_compute_forward_conv_2d(
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
-    ggml_compute_forward_conv_2d_impl(params, src0, src1, dst, src0->type);
+    if (ggml_is_contiguous_channels(src1)) {
+        ggml_compute_forward_conv_2d_cwhn(params, dst);
+    } else {
+        ggml_compute_forward_conv_2d_impl(params, src0, src1, dst, src0->type);
+    }
 }
 
 // ggml_compute_forward_conv_transpose_2d
