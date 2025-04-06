@@ -33,7 +33,7 @@ layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
 layout (binding = 1) writeonly buffer D {D_TYPE data_d[];};
 
-void main() {
+void im2col_whcn() {
     const uint gidx = gl_GlobalInvocationID.x;
 
     const uint oh = gl_GlobalInvocationID.y;
@@ -97,4 +97,48 @@ void main() {
         data_d[offset_dst[idx]] = D_TYPE(values[idx]);
     }
 
+}
+
+void im2col_cwhn() {
+    const uint gidx = gl_GlobalInvocationID.x;
+    const uint batch = gl_GlobalInvocationID.y / p.OH;
+    const uint oh = gl_GlobalInvocationID.y % p.OH;
+
+    const uint base_linear_idx = gidx * NUM_ITER;
+    const uint src_base = batch * p.IH * p.IW * p.IC;
+    
+    for (uint idx = 0; idx < NUM_ITER; ++idx) {
+        const uint linear_idx = base_linear_idx + idx;
+
+        if (linear_idx >= p.pelements) {
+            continue;
+        }
+
+        const uint i0 = linear_idx / p.IC;
+        const uint ic = linear_idx - i0 * p.IC;
+        const uint i1 = i0 / p.KW;
+        const uint kx = i0 - i1 * p.KW;
+        const uint ow = i1 / p.KH;
+        const uint ky = i1 - ow * p.KH;
+
+        const int x = int(ow * p.s0 + kx * p.d0) - p.p0;
+        const int y = int(oh * p.s1 + ky * p.d1) - p.p1;
+
+        const uint offset_dst = gl_GlobalInvocationID.y * p.OW * p.IC * p.KW * p.KH + linear_idx;
+
+        if (x < 0 || x >= p.IW || y < 0 || y >= p.IH) {
+            data_d[offset_dst] = D_TYPE(0);
+        } else {
+            const uint src_idx = src_base + y * p.IW * p.IC + x * p.IC + ic;
+            data_d[offset_dst] = D_TYPE(data_a[src_idx]);
+        }
+    }
+}
+
+void main() {
+#ifdef CWHN
+    im2col_cwhn();
+#else
+    im2col_whcn();
+#endif
 }

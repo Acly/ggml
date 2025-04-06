@@ -397,6 +397,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_argmax_f32;
     vk_pipeline pipeline_count_equal_i32;
     vk_pipeline pipeline_im2col_f32, pipeline_im2col_f32_f16;
+    vk_pipeline pipeline_im2col_cwhn_f32;
     vk_pipeline pipeline_timestep_embedding_f32;
     vk_pipeline pipeline_pool2d_f32;
     vk_pipeline pipeline_rwkv_wkv6_f32;
@@ -2718,6 +2719,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
     } else {
         ggml_vk_create_pipeline(device, device->pipeline_im2col_f32_f16, "im2col_f32_f16", im2col_f32_f16_len, im2col_f32_f16_data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);
     }
+    ggml_vk_create_pipeline(device, device->pipeline_im2col_cwhn_f32, "im2col_cwhn_f32", im2col_cwhn_f32_len, im2col_cwhn_f32_data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);
 
     ggml_vk_create_pipeline(device, device->pipeline_timestep_embedding_f32, "timestep_embedding_f32", timestep_embedding_f32_len, timestep_embedding_f32_data, "main", 2, sizeof(vk_op_timestep_embedding_push_constants), {256, 1, 1}, {}, 1);
 
@@ -6349,11 +6351,17 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
         }
         return nullptr;
     case GGML_OP_IM2COL:
-        if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-            return ctx->device->pipeline_im2col_f32;
-        }
-        if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
-            return ctx->device->pipeline_im2col_f32_f16;
+        if (ggml_is_contiguous(src1)) {
+            if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+                return ctx->device->pipeline_im2col_f32;
+            }
+            if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
+                return ctx->device->pipeline_im2col_f32_f16;
+            }
+        } else if (ggml_is_contiguous_channels(src1)) {
+            if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+                return ctx->device->pipeline_im2col_cwhn_f32;
+            }
         }
         return nullptr;
     case GGML_OP_TIMESTEP_EMBEDDING:
@@ -6421,6 +6429,7 @@ static bool ggml_vk_op_supports_incontiguous(ggml_op op) {
     case GGML_OP_REPEAT_BACK:
     case GGML_OP_ROPE:
     case GGML_OP_RMS_NORM:
+    case GGML_OP_IM2COL:
     case GGML_OP_CONV_2D_DW:
         return true;
     default:
@@ -6686,7 +6695,11 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
 
             const uint32_t batch = src1->ne[is_2D ? 3 : 2];
 
-            elements = { OW * KW * KH, OH, batch * IC };
+            if (ggml_is_contiguous(src1)) {
+                elements = { OW * KW * KH, OH, batch * IC };
+            } else { // channels are contiguous in memory
+                elements = { IC * OW * KW * KH, OH * batch, 1 };
+            }
         } break;
     case GGML_OP_TIMESTEP_EMBEDDING:
         {
@@ -7456,7 +7469,9 @@ static void ggml_vk_im2col(ggml_backend_vk_context * ctx, vk_context& subctx, co
     const uint32_t offset_delta = src1->nb[is_2D ? 2 : 1] / 4; // nb is byte offset, src is type float32
     const uint32_t batch_offset = src1->nb[is_2D ? 3 : 2] / 4; // nb is byte offset, src is type float32
 
-    const uint32_t pelements = OW * KW * KH;
+    const bool is_cwhn = !ggml_is_contiguous(src1);
+
+    const uint32_t pelements = OW * KW * KH * (is_cwhn ? IC : 1);
 
     ggml_vk_op_f32<vk_op_im2col_push_constants>(ctx, subctx, src0, src1, nullptr, dst, GGML_OP_IM2COL, {
         batch_offset, offset_delta,
