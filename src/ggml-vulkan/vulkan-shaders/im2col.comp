@@ -106,32 +106,53 @@ void im2col_cwhn() {
 
     const uint base_linear_idx = gidx * NUM_ITER;
     const uint src_base = batch * p.IH * p.IW * p.IC;
+    const uint dst_base = gl_GlobalInvocationID.y * p.OW * p.IC * p.KW * p.KH;
+
+    uint i0 = base_linear_idx / p.IC;
+    uint ic = base_linear_idx - i0 * p.IC;
+    uint i1 = i0 / p.KW;
+    uint kx = i0 - i1 * p.KW;
+    uint ow = i1 / p.KH;
+    uint ky = i1 - ow * p.KH;
     
+    A_TYPE values[NUM_ITER];
+    [[unroll]] for (uint idx = 0; idx < NUM_ITER; ++idx) {
+        values[idx] = A_TYPE(0);
+    }
+
+    [[unroll]]
     for (uint idx = 0; idx < NUM_ITER; ++idx) {
         const uint linear_idx = base_linear_idx + idx;
-
         if (linear_idx >= p.pelements) {
             continue;
         }
 
-        const uint i0 = linear_idx / p.IC;
-        const uint ic = linear_idx - i0 * p.IC;
-        const uint i1 = i0 / p.KW;
-        const uint kx = i0 - i1 * p.KW;
-        const uint ow = i1 / p.KH;
-        const uint ky = i1 - ow * p.KH;
-
-        const int x = int(ow * p.s0 + kx * p.d0) - p.p0;
-        const int y = int(oh * p.s1 + ky * p.d1) - p.p1;
-
-        const uint offset_dst = gl_GlobalInvocationID.y * p.OW * p.IC * p.KW * p.KH + linear_idx;
-
-        if (x < 0 || x >= p.IW || y < 0 || y >= p.IH) {
-            data_d[offset_dst] = D_TYPE(0);
-        } else {
+        const uint x = ow * p.s0 + kx * p.d0 - p.p0;
+        const uint y = oh * p.s1 + ky * p.d1 - p.p1;
+        if (x < p.IW && y < p.IH) {
             const uint src_idx = src_base + y * p.IW * p.IC + x * p.IC + ic;
-            data_d[offset_dst] = D_TYPE(data_a[src_idx]);
+            values[idx] = data_a[src_idx];
         }
+
+        if (++ic == p.IC) {
+            ic = 0;
+            if (++kx == p.KW) {
+                kx = 0;
+                if (++ky == p.KH) {
+                    ky = 0;
+                    ++ow;
+                }
+            }
+        }
+    }
+
+    [[unroll]]
+    for (uint idx = 0; idx < NUM_ITER; ++idx) {
+        const uint linear_idx = base_linear_idx + idx;
+        if (linear_idx >= p.pelements) {
+            continue;
+        }
+        data_d[dst_base + linear_idx] = D_TYPE(values[idx]);
     }
 }
 
