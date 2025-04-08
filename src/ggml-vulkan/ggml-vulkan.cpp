@@ -263,6 +263,7 @@ struct vk_device_struct {
     bool fp16;
     bool pipeline_robustness;
     vk::Device device;
+    vk::detail::DispatchLoaderDynamic dispatch;
     uint32_t vendor_id;
     vk::DriverId driver_id;
     vk_device_architecture architecture;
@@ -1108,6 +1109,12 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
         throw e;
     }
     pipeline->compiled = true;
+
+    device->device.setDebugUtilsObjectNameEXT(
+        vk::DebugUtilsObjectNameInfoEXT(vk::ObjectType::ePipeline,
+        (uint64_t)((VkPipeline)pipeline->pipeline),
+        pipeline->name.c_str()),
+        device->dispatch);
 
     {
         std::lock_guard<std::mutex> guard(device->mutex);
@@ -3276,6 +3283,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device_create_info.setPNext(&device_features2);
         device->device = device->physical_device.createDevice(device_create_info);
 
+        device->dispatch = vk::detail::DispatchLoaderDynamic(vk_instance.instance, vkGetInstanceProcAddr);
+
         // Queues
         ggml_vk_create_queue(device, device->compute_queue, compute_queue_family_index, 0, { vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer }, false);
 
@@ -3509,6 +3518,7 @@ static void ggml_vk_instance_init() {
     if (validation_ext) {
         extensions.push_back("VK_EXT_validation_features");
     }
+    extensions.push_back("VK_EXT_debug_utils");
 #ifdef __APPLE__
     if (portability_enumeration_ext) {
         extensions.push_back("VK_KHR_portability_enumeration");
