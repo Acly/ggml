@@ -702,15 +702,6 @@ struct vk_op_conv2d_dw_push_constants {
     int32_t dilation_y;
 };
 
-// Allow pre-recording command buffers
-struct vk_staging_memcpy {
-    vk_staging_memcpy(void * _dst, const void * _src, size_t _n) : dst(_dst), src(_src), n(_n) {}
-
-    void * dst;
-    const void * src;
-    size_t n;
-};
-
 struct vk_op_upscale_push_constants {
     uint32_t ne; uint32_t a_offset; uint32_t d_offset;
     uint32_t nb00; uint32_t nb01; uint32_t nb02; uint32_t nb03;

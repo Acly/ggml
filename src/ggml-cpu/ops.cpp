@@ -3591,9 +3591,9 @@ void ggml_compute_forward_l2_norm(
     }
 }
 
-// ggml_compute_forward_batch_norm
+// ggml_compute_forward_batch_norm_2d
 
-static void ggml_compute_forward_batch_norm(
+static void ggml_compute_forward_batch_norm_2d(
     const struct ggml_compute_params * params,
     struct ggml_tensor * dst) {
 
@@ -6132,7 +6132,7 @@ static void ggml_call_mul_mat(
     int64_t m, int64_t n, int64_t k,
     const float * a, const float * b, float * c) {
 
-    struct ggml_tensor src1 = {0};
+    struct ggml_tensor src1 = {};
     src1.ne[0] = k;
     src1.ne[1] = m;
     src1.ne[2] = 1;
@@ -6143,7 +6143,7 @@ static void ggml_call_mul_mat(
     src1.nb[3] = src1.nb[2];
     src1.data = (void *)a;
 
-    struct ggml_tensor src0 = {0};
+    struct ggml_tensor src0 = {};
     src0.ne[0] = k;
     src0.ne[1] = n;
     src0.ne[2] = 1;
@@ -6154,7 +6154,7 @@ static void ggml_call_mul_mat(
     src0.nb[3] = src0.nb[2];
     src0.data = (void *)b;
 
-    struct ggml_tensor dst = {0};
+    struct ggml_tensor dst = {};
     dst.ne[0] = n;
     dst.ne[1] = m;
     dst.ne[2] = 1;
