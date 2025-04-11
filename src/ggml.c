@@ -850,37 +850,8 @@ const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
 }
 
 //
-// ggml object
-//
-
-struct ggml_object {
-    size_t offs;
-    size_t size;
-
-    struct ggml_object * next;
-
-    enum ggml_object_type type;
-
-    char padding[4];
-};
-
-static const size_t GGML_OBJECT_SIZE = sizeof(struct ggml_object);
-
-//
 // ggml context
 //
-
-struct ggml_context {
-    size_t mem_size;
-    void * mem_buffer;
-    bool   mem_buffer_owned;
-    bool   no_alloc;
-
-    int    n_objects;
-
-    struct ggml_object * objects_begin;
-    struct ggml_object * objects_end;
-};
 
 struct ggml_context_container {
     bool used;

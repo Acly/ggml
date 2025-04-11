@@ -2725,6 +2725,35 @@ struct test_conv_transpose_1d : public test_case {
     }
 };
 
+// GGML_OP_CONV_TRANSPOSE_2D
+struct test_conv_transpose_2d : public test_case {
+    const std::array<int64_t, 4> ne_input;
+    const std::array<int64_t, 4> ne_kernel;
+    const int stride;
+
+    std::string vars() override {
+        return VARS_TO_STR3(ne_input, ne_kernel, stride);
+    }
+
+    test_conv_transpose_2d(std::array<int64_t, 4> ne_input = {64, 64, 32, 1},
+                           std::array<int64_t, 4> ne_kernel = {3, 3, 8, 32},
+                           int stride = 2)
+        : ne_input(ne_input), ne_kernel(ne_kernel), stride(stride) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * input = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne_input.data());
+        ggml_set_name(input, "input");
+
+        ggml_tensor * kernel = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne_kernel.data());
+        ggml_set_name(kernel, "kernel");
+
+        ggml_tensor * out = ggml_conv_transpose_2d(ctx, kernel, input, stride, cwhn);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+}
+
 // GGML_OP_IM2COL
 struct test_im2col : public test_case {
     const ggml_type type_input;
@@ -4037,6 +4066,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_conv_transpose_1d({3,2,1,1}, {3,2,2,1}, 1, 0, 1));
     test_cases.emplace_back(new test_conv_transpose_1d({3,2,1,1}, {3,1,2,1}, 1, 0, 1));
     test_cases.emplace_back(new test_conv_transpose_1d({2,1,1,1}, {3,1,1,1}, 1, 0, 1));
+
+    test_cases.emplace_back(new test_conv_transpose_2d({7, 5, 3, 1}, {3, 2, 4, 3}, 1));
+    test_cases.emplace_back(new test_conv_transpose_2d({7, 5, 3, 2}, {4, 3, 2, 3}, 2));
+    test_cases.emplace_back(new test_conv_transpose_2d({4, 4, 72, 1}, {3, 3, 6, 72}, 2));
 
     test_cases.emplace_back(new test_count_equal(GGML_TYPE_F32, {4,  500, 1, 1}));
     test_cases.emplace_back(new test_count_equal(GGML_TYPE_F32, {4, 5000, 1, 1}));
