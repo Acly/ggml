@@ -372,6 +372,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_opt_step_adamw_f32;
     vk_pipeline pipeline_conv2d_dw_whcn_f32;
     vk_pipeline pipeline_conv2d_dw_cwhn_f32;
+    vk_pipeline pipeline_conv_transpose_2d_cwhn_f32;
 
     // [2][2][2] is for {f16acc,f32acc}x{large,small_rows}x{unaligned, aligned}
     vk_pipeline pipeline_flash_attn_f32_f16_D64[GGML_TYPE_COUNT][2][2][2];
@@ -700,6 +701,21 @@ struct vk_op_conv2d_dw_push_constants {
     int32_t pad_y;
     int32_t dilation_x;
     int32_t dilation_y;
+};
+
+struct vk_op_conv_transpose_2d_push_constants {
+    uint32_t ne;
+    uint32_t batches;
+    uint32_t c_in;
+    uint32_t c_out;
+    uint32_t dst_w;
+    uint32_t dst_h;
+    uint32_t src_w;
+    uint32_t src_h;
+    uint32_t knl_w;
+    uint32_t knl_h;    
+    uint32_t stride_x;
+    uint32_t stride_y;
 };
 
 struct vk_op_upscale_push_constants {
@@ -2560,6 +2576,8 @@ static void ggml_vk_load_shaders(vk_device& device) {
 
     ggml_vk_create_pipeline(device, device->pipeline_conv2d_dw_whcn_f32, "conv2d_dw_whcn_f32", conv2d_dw_whcn_f32_len, conv2d_dw_whcn_f32_data, "main", 3, sizeof(vk_op_conv2d_dw_push_constants), {512, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_conv2d_dw_cwhn_f32, "conv2d_dw_cwhn_f32", conv2d_dw_cwhn_f32_len, conv2d_dw_cwhn_f32_data, "main", 3, sizeof(vk_op_conv2d_dw_push_constants), {512, 1, 1}, {}, 1);
+
+    ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_2d_cwhn_f32, "conv_transpose_2d_cwhn_f32", conv_transpose_2d_cwhn_f32_len, conv_transpose_2d_cwhn_f32_data, "main", 3, sizeof(vk_op_conv_transpose_2d_push_constants), {1, 1, 1}, { device->subgroup_size }, 1);
 
     for (auto &c : compiles) {
         c.wait();
@@ -6038,6 +6056,13 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
             }
         }
         return nullptr;
+    case GGML_OP_CONV_TRANSPOSE_2D:
+        if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            if (ggml_is_contiguous_channels(src1)) {
+                return ctx->device->pipeline_conv_transpose_2d_cwhn_f32;
+            }
+        }
+        return nullptr;
     default:
         return nullptr;
     }
@@ -6066,6 +6091,7 @@ static bool ggml_vk_op_supports_incontiguous(ggml_op op) {
     case GGML_OP_RMS_NORM:
     case GGML_OP_IM2COL:
     case GGML_OP_CONV_2D_DW:
+    case GGML_OP_CONV_TRANSPOSE_2D:
         return true;
     default:
         return false;
@@ -6367,6 +6393,7 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     case GGML_OP_UPSCALE:
     case GGML_OP_UNARY:
     case GGML_OP_CONV_2D_DW:
+    case GGML_OP_CONV_TRANSPOSE_2D:
         {
             const uint32_t ne = ggml_nelements(dst);
             if (ne > 262144) {
@@ -7177,6 +7204,27 @@ static void ggml_vk_conv_2d_dw(ggml_backend_vk_context * ctx, vk_context& subctx
     GGML_ASSERT(src1->ne[3] == p.batches);
 
     ggml_vk_op_f32(ctx, subctx, src0, src1, nullptr, dst, GGML_OP_CONV_2D_DW, std::move(p), dryrun);
+}
+
+static void ggml_vk_conv_transpose_2d(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, bool dryrun = false) {
+    vk_op_conv_transpose_2d_push_constants p{};
+    p.ne = ggml_nelements(dst);
+    p.batches = dst->ne[3];
+    p.c_in = src1->ne[2];
+    p.c_out = dst->ne[2];
+    p.dst_w = dst->ne[0];
+    p.dst_h = dst->ne[1];
+    p.src_w = src1->ne[0];
+    p.src_h = src1->ne[1];
+    p.knl_w = src0->ne[0];
+    p.knl_h = src0->ne[1];
+    p.stride_x = dst->op_params[0];
+    p.stride_y = dst->op_params[0];
+
+    GGML_ASSERT(src0->ne[2] == p.c_out);
+    GGML_ASSERT(src0->ne[3] == p.c_in);
+
+    ggml_vk_op_f32(ctx, subctx, src0, src1, nullptr, dst, GGML_OP_CONV_TRANSPOSE_2D, std::move(p), dryrun);
 }
 
 static void ggml_vk_leaky_relu(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst, bool dryrun = false) {
@@ -8200,6 +8248,7 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_tensor * nod
     case GGML_OP_TIMESTEP_EMBEDDING:
     case GGML_OP_POOL_2D:
     case GGML_OP_CONV_2D_DW:
+    case GGML_OP_CONV_TRANSPOSE_2D:
     case GGML_OP_RWKV_WKV6:
     case GGML_OP_RWKV_WKV7:
     case GGML_OP_LEAKY_RELU:
@@ -8264,6 +8313,7 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_tensor * nod
         case GGML_OP_TIMESTEP_EMBEDDING:
         case GGML_OP_POOL_2D:
         case GGML_OP_CONV_2D_DW:
+        case GGML_OP_CONV_TRANSPOSE_2D:
         case GGML_OP_LEAKY_RELU:
             {
                 // These operations all go through ggml_vk_op_f32, so short-circuit and
@@ -8442,6 +8492,10 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_tensor * nod
         ggml_vk_conv_2d_dw(ctx, compute_ctx, src0, src1, node, dryrun);
 
         break;
+    case GGML_OP_CONV_TRANSPOSE_2D:
+        ggml_vk_conv_transpose_2d(ctx, compute_ctx, src0, src1, node, dryrun);
+
+        break;
     case GGML_OP_LEAKY_RELU:
         ggml_vk_leaky_relu(ctx, compute_ctx, src0, node, dryrun);
 
@@ -8563,6 +8617,7 @@ static bool ggml_vk_compute_forward(ggml_backend_vk_context * ctx, ggml_tensor *
     case GGML_OP_TIMESTEP_EMBEDDING:
     case GGML_OP_POOL_2D:
     case GGML_OP_CONV_2D_DW:
+    case GGML_OP_CONV_TRANSPOSE_2D:
     case GGML_OP_RWKV_WKV6:
     case GGML_OP_RWKV_WKV7:
     case GGML_OP_LEAKY_RELU:
@@ -9533,6 +9588,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
         case GGML_OP_IM2COL:
         case GGML_OP_TIMESTEP_EMBEDDING:
         case GGML_OP_CONV_2D_DW:
+        case GGML_OP_CONV_TRANSPOSE_2D:
         case GGML_OP_POOL_2D:
         case GGML_OP_RWKV_WKV6:
         case GGML_OP_RWKV_WKV7:
