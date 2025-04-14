@@ -3593,7 +3593,7 @@ void ggml_compute_forward_l2_norm(
 
 // ggml_compute_forward_batch_norm_2d
 
-static void ggml_compute_forward_batch_norm_2d(
+void ggml_compute_forward_batch_norm_2d(
     const struct ggml_compute_params * params,
     struct ggml_tensor * dst) {
 
@@ -3605,7 +3605,7 @@ static void ggml_compute_forward_batch_norm_2d(
 
     int64_t n = src->ne[1] * src->ne[2] * src->ne[3];
     int64_t c = src->ne[0];
-    int64_t steps = (c + GGML_F32_STEP - 1) / GGML_F32_STEP;
+    int64_t steps = c / GGML_F32_STEP;
     int64_t steps_end = steps * GGML_F32_STEP;
     int64_t steps_rest = c - steps_end;
 
@@ -6127,7 +6127,7 @@ void ggml_compute_forward_conv_transpose_2d(
 
 // ggml_compute_forward_conv_2d
 
-static void ggml_call_mul_mat(
+void ggml_call_mul_mat(
     struct ggml_compute_params * params,
     int64_t m, int64_t n, int64_t k,
     const float * a, const float * b, float * c) {
@@ -6170,7 +6170,7 @@ static void ggml_call_mul_mat(
     ggml_compute_forward_mul_mat(params, &dst);
 }
 
-static void ggml_compute_forward_conv_2d_cwhn(
+void ggml_compute_forward_conv_2d_cwhn(
         struct ggml_compute_params * params,
         struct ggml_tensor * dst) {
 
