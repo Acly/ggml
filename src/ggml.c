@@ -50,6 +50,8 @@
 #include <windows.h>
 #endif
 
+#pragma optimize("", off)
+
 #define UNUSED GGML_UNUSED
 
 #if defined(_MSC_VER)
@@ -3268,6 +3270,21 @@ struct ggml_tensor * ggml_view_4d(
 
 // ggml_permute
 
+void ggml_set_permuted_strides(struct ggml_tensor * a, int axis0, int axis1, int axis2, int axis3) {
+    a->nb[axis0] = ggml_type_size(a->type);
+    a->nb[axis1] = a->nb[axis0] * (a->ne[axis0] / ggml_blck_size(a->type));
+    a->nb[axis2] = a->nb[axis1] * a->ne[axis1];
+    a->nb[axis3] = a->nb[axis2] * a->ne[axis2];
+
+            // // Result will be permuted the same way as input (CWHN order)
+            // const int64_t type_size = ggml_type_size(result->type);
+            // GGML_ASSERT(ggml_blck_size(result->type) == 1);
+            // result->nb[0] = result->ne[2] * type_size;
+            // result->nb[1] = result->ne[0] * result->nb[0];
+            // result->nb[2] = type_size;
+    
+}
+
 struct ggml_tensor * ggml_permute(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
@@ -4043,9 +4060,6 @@ struct ggml_tensor * ggml_conv_2d(
         // Memory layout of input b:  [N,  IH, IW, IC], permuted to [N,  IC, IH, IW]
         // Memory layout of result:   [N,  OH, OW, OC], permuted to [N,  OC, OH, OW]
         // Memory layout of kernel a: [OC, KH, KW, IC], permuted to [OC, IC, KH, KW]
-        const int64_t type_size = ggml_type_size(b->type);
-        GGML_ASSERT(ggml_blck_size(b->type) == 1);
-
         const int64_t ne[4] = {
             ggml_calc_conv_output_size(b->ne[0], a->ne[0], s0, p0, d0),
             ggml_calc_conv_output_size(b->ne[1], a->ne[1], s1, p1, d1),
@@ -4053,9 +4067,7 @@ struct ggml_tensor * ggml_conv_2d(
             b->ne[3]
         };
         struct ggml_tensor * result = ggml_new_tensor(ctx, b->type, 4, ne);
-        result->nb[0] = result->ne[2] * type_size;
-        result->nb[1] = result->ne[0] * result->nb[0];
-        result->nb[2] = type_size;
+        ggml_set_permuted_strides(result, 2, 0, 1, 3);
 
         int32_t params[] = { s0, s1, p0, p1, d0, d1 };
         ggml_set_op_params(result, params, sizeof(params));
@@ -4134,12 +4146,7 @@ struct ggml_tensor * ggml_conv_2d_dw_direct(
     struct ggml_tensor * result = ggml_new_tensor(ctx, b->type, 4, ne);
 
     if (ggml_is_contiguous_channels(b)) {
-        // Result will be permuted the same way as input (CWHN order)
-        const int64_t type_size = ggml_type_size(result->type);
-        GGML_ASSERT(ggml_blck_size(result->type) == 1);
-        result->nb[0] = result->ne[2] * type_size;
-        result->nb[1] = result->ne[0] * result->nb[0];
-        result->nb[2] = type_size;
+        ggml_set_permuted_strides(result, 2, 0, 1, 3);
     }
 
     int32_t params[] = { stride0, stride1, pad0, pad1, dilation0, dilation1 };
@@ -4171,6 +4178,10 @@ struct ggml_tensor * ggml_conv_transpose_2d_p0(
     };
 
     struct ggml_tensor* result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    if (ggml_is_contiguous_channels(b)) {
+        ggml_set_permuted_strides(result, 2, 0, 1, 3);
+    }
 
     ggml_set_op_params_i32(result, 0, stride);
 
