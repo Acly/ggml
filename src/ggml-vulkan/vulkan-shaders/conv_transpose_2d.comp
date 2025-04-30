@@ -18,6 +18,7 @@ layout (push_constant) uniform parameter
     uint knl_h;    
     uint stride_x;
     uint stride_y;
+    uint is_cwhn;
 } p;
 
 layout (binding = 0) readonly buffer A {A_TYPE knl_data[];};
@@ -28,7 +29,12 @@ layout(constant_id = 0) const uint BLOCK_SIZE = 32;
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
-FLOAT_TYPE conv_transpose_2d_cwhn(uint idx) {
+void main() {
+    uint idx = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
+    if (idx >= p.ne) {
+        return;
+    }
+
     uint i0 = idx / p.c_out;
     uint dst_c = idx - i0 * p.c_out;
     uint i1 = i0 / p.dst_w;
@@ -72,14 +78,11 @@ FLOAT_TYPE conv_transpose_2d_cwhn(uint idx) {
             }
         }
     }
-    return subgroupAdd(sum);
-}
+    FLOAT_TYPE result = subgroupAdd(sum);
 
-void main() {
-    uint idx = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
-    if (idx >= p.ne) {
-        return;
+    uint out_idx = idx;
+    if (p.is_cwhn == 0) { // write output in WHCN order
+        out_idx = n * p.c_out*p.dst_h*p.dst_w + dst_c * p.dst_h*p.dst_w + dst_y * p.dst_w + dst_x;
     }
-
-    dst_data[idx] = D_TYPE(conv_transpose_2d_cwhn(idx));
+    dst_data[out_idx] = D_TYPE(result);
 }
