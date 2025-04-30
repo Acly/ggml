@@ -34,7 +34,10 @@ void main() {
     if (idx >= p.ne) {
         return;
     }
-
+    //       <-- most contiguous
+    // src: [c_in,  src_w, src_h, batches]
+    // knl: [c_in,  knl_w, knl_h, c_out]
+    // dst: [c_out, dst_w, dst_h, batches]
     uint i0 = idx / p.c_out;
     uint dst_c = idx - i0 * p.c_out;
     uint i1 = i0 / p.dst_w;

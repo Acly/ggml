@@ -106,6 +106,39 @@ GGML_API void ggml_log_callback_default(enum ggml_log_level level, const char * 
 #define GGML_PRINT_DEBUG_10(...)
 #endif
 
+//
+// ggml object
+//
+
+struct ggml_object {
+    size_t offs;
+    size_t size;
+
+    struct ggml_object * next;
+
+    enum ggml_object_type type;
+
+    char padding[4];
+};
+
+static const size_t GGML_OBJECT_SIZE = sizeof(struct ggml_object);
+
+//
+// ggml context
+//
+
+struct ggml_context {
+    size_t mem_size;
+    void * mem_buffer;
+    bool   mem_buffer_owned;
+    bool   no_alloc;
+
+    int    n_objects;
+
+    struct ggml_object * objects_begin;
+    struct ggml_object * objects_end;
+};
+
 // tensor params
 
 static void ggml_set_op_params(struct ggml_tensor * tensor, const void * params, size_t params_size) {
@@ -590,6 +623,21 @@ static inline ggml_bf16_t ggml_compute_fp32_to_bf16(float s) {
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+
+template<size_t n_tensors>
+struct ggml_local_context : ggml_context {
+    alignas(GGML_MEM_ALIGN) char storage[n_tensors * (GGML_OBJECT_SIZE + GGML_TENSOR_SIZE)];
+
+    ggml_local_context() : ggml_context() {
+        mem_size = sizeof(storage);
+        mem_buffer = storage;
+        mem_buffer_owned = false;
+        no_alloc = true;
+    }
+};
+#endif // __cplusplus
 
 #ifdef __cplusplus
 #include <vector>

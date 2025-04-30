@@ -405,7 +405,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_opt_step_adamw_f32;
     vk_pipeline pipeline_conv2d_dw_whcn_f32;
     vk_pipeline pipeline_conv2d_dw_cwhn_f32;
-    vk_pipeline pipeline_conv_transpose_2d_cwhn_f32;
+    vk_pipeline pipeline_conv_transpose_2d_f32;
 
     // [2][2][2] is for {f16acc,f32acc}x{large,small_rows}x{unaligned, aligned}
     vk_pipeline pipeline_flash_attn_f32_f16_D64_cm2[GGML_TYPE_COUNT][2][2][2];
@@ -1583,6 +1583,11 @@ static vk_subbuffer ggml_vk_subbuffer(vk_buffer& buf) {
     return { buf, 0, VK_WHOLE_SIZE };
 }
 
+static size_t ggml_vk_align_size(size_t width, size_t align) {
+    VK_LOG_DEBUG("ggml_vk_align_size(" << width << ", " << align << ")");
+    return CEIL_DIV(width, align) * align;
+}
+
 static size_t ggml_vk_reserve_temp_buffer(ggml_backend_vk_context * ctx, size_t size) {
     size = ggml_vk_align_size(size, ctx->device->properties.limits.minStorageBufferOffsetAlignment);
     ctx->scratch_size = std::max(ctx->scratch_size, size);
@@ -2751,7 +2756,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
     ggml_vk_create_pipeline(device, device->pipeline_conv2d_dw_whcn_f32, "conv2d_dw_whcn_f32", conv2d_dw_whcn_f32_len, conv2d_dw_whcn_f32_data, "main", 3, sizeof(vk_op_conv2d_dw_push_constants), {512, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_conv2d_dw_cwhn_f32, "conv2d_dw_cwhn_f32", conv2d_dw_cwhn_f32_len, conv2d_dw_cwhn_f32_data, "main", 3, sizeof(vk_op_conv2d_dw_push_constants), {512, 1, 1}, {}, 1);
 
-    ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_2d_cwhn_f32, "conv_transpose_2d_cwhn_f32", conv_transpose_2d_cwhn_f32_len, conv_transpose_2d_cwhn_f32_data, "main", 3, sizeof(vk_op_conv_transpose_2d_push_constants), {1, 1, 1}, { device->subgroup_size }, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_2d_f32, "conv_transpose_2d_f32", conv_transpose_2d_f32_len, conv_transpose_2d_f32_data, "main", 3, sizeof(vk_op_conv_transpose_2d_push_constants), {1, 1, 1}, { device->subgroup_size }, 1);
 
     for (auto &c : compiles) {
         c.wait();
@@ -4110,11 +4115,6 @@ static void ggml_vk_ctx_begin(vk_device& device, vk_context& subctx) {
 
     subctx->seqs.push_back({ ggml_vk_begin_submission(device, *subctx->q) });
     subctx->s = subctx->seqs[subctx->seqs.size() - 1].data();
-}
-
-static size_t ggml_vk_align_size(size_t width, size_t align) {
-    VK_LOG_DEBUG("ggml_vk_align_size(" << width << ", " << align << ")");
-    return CEIL_DIV(width, align) * align;
 }
 
 static void deferred_memcpy(void * dst, const void * src, size_t size, std::vector<vk_staging_memcpy>* memcpys = nullptr) {
@@ -6334,7 +6334,7 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
         return nullptr;
     case GGML_OP_CONV_TRANSPOSE_2D:
         if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-            return ctx->device->pipeline_conv_transpose_2d_cwhn_f32;
+            return ctx->device->pipeline_conv_transpose_2d_f32;
         }
         return nullptr;
     default:
@@ -7505,32 +7505,27 @@ static void ggml_vk_conv_transpose_2d(ggml_backend_vk_context * ctx, vk_context&
             temp_size = ggml_vk_reserve_temp_buffer(ctx, temp_size + ggml_nbytes(src1));
             ggml_pipeline_request_descriptor_sets(ctx->device, ctx->device->pipeline_cpy_f32_f32, 2);
         }
-        ggml_pipeline_request_descriptor_sets(ctx->device, ctx->device->pipeline_conv_transpose_2d_cwhn_f32, 1);
+        ggml_pipeline_request_descriptor_sets(ctx->device, ctx->device->pipeline_conv_transpose_2d_f32, 1);
         return;
     }
 
     ggml_tensor dst_copy = *dst;
     ggml_vk_temp_buffer tmp_buffer{ctx};
-    ggml_context * tmp_ctx = nullptr;
+    ggml_local_context<4> tmp_ctx;
 
     if (!p.is_cwhn) {
         // Convert to channels-most-contiguous (CWHN) layout
         GGML_ASSERT(ggml_is_contiguous(src0));
         GGML_ASSERT(ggml_is_contiguous(src1));
 
-        ggml_init_params tmp_params{};
-        tmp_params.mem_size = 4 * ggml_tensor_overhead();
-        tmp_params.no_alloc = true;
-        tmp_ctx = ggml_init(tmp_params);
-
-        ggml_tensor * src_perm = ggml_permute(tmp_ctx, (ggml_tensor *)src1, 1, 2, 0, 3);
-        ggml_tensor * src_copy = ggml_cont(tmp_ctx, src_perm);
+        ggml_tensor * src_perm = ggml_permute(&tmp_ctx, (ggml_tensor *)src1, 1, 2, 0, 3);
+        ggml_tensor * src_copy = ggml_cont(&tmp_ctx, src_perm);
         src_perm->buffer = src1->buffer;
         ggml_vk_use_buffer(src_copy, tmp_buffer);
         ggml_vk_cpy(ctx, subctx, src_perm, src_copy);
 
-        ggml_tensor * knl_perm = ggml_permute(tmp_ctx, (ggml_tensor *)src0, 1, 2, 3, 0);
-        ggml_tensor * knl_copy = ggml_cont(tmp_ctx, knl_perm);
+        ggml_tensor * knl_perm = ggml_permute(&tmp_ctx, (ggml_tensor *)src0, 1, 2, 3, 0);
+        ggml_tensor * knl_copy = ggml_cont(&tmp_ctx, knl_perm);
         knl_perm->buffer = src0->buffer;
         ggml_vk_use_buffer(knl_copy, tmp_buffer);
         ggml_vk_cpy(ctx, subctx, knl_perm, knl_copy);
@@ -7540,10 +7535,6 @@ static void ggml_vk_conv_transpose_2d(ggml_backend_vk_context * ctx, vk_context&
     }
 
     ggml_vk_op_f32(ctx, subctx, src0, src1, nullptr, &dst_copy, GGML_OP_CONV_TRANSPOSE_2D, std::move(p), dryrun);
-
-    if (tmp_ctx) {
-        ggml_free(tmp_ctx);
-    }
 }
 
 static void ggml_vk_leaky_relu(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst, bool dryrun = false) {
