@@ -504,6 +504,7 @@ extern "C" {
         GGML_OP_WIN_UNPART,
         GGML_OP_GET_REL_POS,
         GGML_OP_ADD_REL_POS,
+        GGML_OP_ROLL,
         GGML_OP_RWKV_WKV6,
         GGML_OP_GATED_LINEAR_ATTN,
         GGML_OP_RWKV_WKV7,
@@ -1920,6 +1921,14 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * pw,
             struct ggml_tensor  * ph);
+
+    GGML_API struct ggml_tensor * ggml_roll(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   shift0,
+            int                   shift1,
+            int                   shift2,
+            int                   shift3);
 
     GGML_API struct ggml_tensor * ggml_rwkv_wkv6(
             struct ggml_context * ctx,
