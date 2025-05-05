@@ -943,6 +943,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "WIN_UNPART",
     "GET_REL_POS",
     "ADD_REL_POS",
+    "ROLL",
     "RWKV_WKV6",
     "GATED_LINEAR_ATTN",
     "RWKV_WKV7",
@@ -960,7 +961,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_ADAMW",
 };
 
-static_assert(GGML_OP_COUNT == 84, "GGML_OP_COUNT != 84");
+static_assert(GGML_OP_COUNT == 85, "GGML_OP_COUNT != 85");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1040,6 +1041,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "win_unpart(x)",
     "get_rel_pos(x)",
     "add_rel_pos(x)",
+    "roll(x)",
     "rwkv_wkv6(k, v, r, tf, td, s)",
     "gated_linear_attn(k, v, q, gate, s)",
     "rwkv_wkv7(r, w, k, v, a, b, s)",
@@ -1057,7 +1059,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "adamw(x)",
 };
 
-static_assert(GGML_OP_COUNT == 84, "GGML_OP_COUNT != 84");
+static_assert(GGML_OP_COUNT == 85, "GGML_OP_COUNT != 85");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -4745,6 +4747,32 @@ struct ggml_tensor * ggml_add_rel_pos_inplace(
         struct ggml_tensor  * pw,
         struct ggml_tensor  * ph) {
     return ggml_add_rel_pos_impl(ctx, a, pw, ph, true);
+}
+
+// ggml_roll
+
+struct ggml_tensor * ggml_roll(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   shift0,
+        int                   shift1,
+        int                   shift2,
+        int                   shift3) {
+    GGML_ASSERT(ggml_is_contiguous_1(a));
+    GGML_ASSERT(abs(shift0) < a->ne[0]);
+    GGML_ASSERT(abs(shift1) < a->ne[1]);
+    GGML_ASSERT(abs(shift2) < a->ne[2]);
+    GGML_ASSERT(abs(shift3) < a->ne[3]);
+
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
+    result->op           = GGML_OP_ROLL;
+    result->src[0]       = a;
+    result->op_params[0] = shift0;
+    result->op_params[1] = shift1;
+    result->op_params[2] = shift2;
+    result->op_params[3] = shift3;
+
+    return result;
 }
 
 // ggml_rwkv_wkv6
