@@ -1768,6 +1768,9 @@ extern "C" {
     enum ggml_scale_mode {
         GGML_SCALE_MODE_NEAREST  = 0,
         GGML_SCALE_MODE_BILINEAR = 1,
+
+        GGML_SCALE_MODE_MASK     = (1 << 16) - 1,
+        GGML_SCALE_ALIGN_CORNERS = (1 << 16),
     };
 
     // interpolate
@@ -1787,7 +1790,7 @@ extern "C" {
             int                   ne1,
             int                   ne2,
             int                   ne3,
-            enum ggml_scale_mode  mode);
+            int                   mode);
 
     // pad each dimension with zeros: [x, ..., x] -> [x, ..., x, 0, ..., 0]
     GGML_API struct ggml_tensor * ggml_pad(

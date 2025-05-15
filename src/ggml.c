@@ -4306,7 +4306,7 @@ static struct ggml_tensor * ggml_upscale_impl(
         int                   ne1,
         int                   ne2,
         int                   ne3,
-        enum ggml_scale_mode  mode) {
+        int                   mode) {
     // GGML_ASSERT(a->ne[0] <= ne0);
     // GGML_ASSERT(a->ne[1] <= ne1);
     // GGML_ASSERT(a->ne[2] <= ne2);
@@ -4337,7 +4337,7 @@ struct ggml_tensor * ggml_upscale_ext(
         int                   ne1,
         int                   ne2,
         int                   ne3,
-        enum ggml_scale_mode  mode) {
+        int                   mode) {
     return ggml_upscale_impl(ctx, a, ne0, ne1, ne2, ne3, mode);
 }
 
