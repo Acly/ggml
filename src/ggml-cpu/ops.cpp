@@ -6158,14 +6158,14 @@ void ggml_call_mul_mat(
 }
 
 void ggml_compute_forward_conv_2d_cwhn(
-        struct ggml_compute_params * params,
-        struct ggml_tensor * dst) {
+        ggml_compute_params * params,
+        ggml_tensor * dst) {
 
-    const struct ggml_tensor * src = dst->src[1];
-    const struct ggml_tensor * kernel = dst->src[0];
+    const ggml_tensor * src = dst->src[1];
+    const ggml_tensor * kernel = dst->src[0];
     GGML_ASSERT(ggml_is_contiguous_channels(src));    // [C_in W H N] in memory
     GGML_ASSERT(ggml_is_contiguous_channels(kernel)   // [C_in W H C_out] in memory
-            || kernel->ne[0] == 1 && kernel->ne[1] == 1);
+            || (kernel->ne[0] == 1 && kernel->ne[1] == 1));
 
     const int32_t stride_x = dst->op_params[0];
     const int32_t stride_y = dst->op_params[1];
@@ -6240,6 +6240,108 @@ void ggml_compute_forward_conv_2d_cwhn(
         ggml_call_mul_mat(params, patch_n, c_out, knl_n, tmp, knl_data, dst_data_offset);
     } // for each batch
 }
+
+// ggml_compute_forward_conv_2d_deform
+
+float bilinear_interpolate(
+        const float * data,
+        int64_t w, int64_t h, int64_t channels,
+        float x, float y, int64_t c) {
+
+    if (x <= -1 || x >= w || y <= -1 || y >= h) {
+        return 0.0f;
+    }
+
+    int64_t x0 = (int64_t)floorf(x);
+    int64_t y0 = (int64_t)floorf(y);
+    int64_t x1 = x0 + 1;
+    int64_t y1 = y0 + 1;
+
+    float dx = x - x0;
+    float dy = y - y0;
+
+    float v00 = x0 >= 0 && y0 >= 0 ? data[(y0 * w + x0) * channels + c] : 0.0f;
+    float v01 = x1 <  w && y0 >= 0 ? data[(y0 * w + x1) * channels + c] : 0.0f;
+    float v10 = x0 >= 0 && y1 <  h ? data[(y1 * w + x0) * channels + c] : 0.0f;
+    float v11 = x1 <  w && y1 <  h ? data[(y1 * w + x1) * channels + c] : 0.0f;
+
+    return (v00 * (1.0f - dx) + v01 * dx) * (1.0f - dy)
+         + (v10 * (1.0f - dx) + v11 * dx) * dy;
+}
+
+void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * src = dst->src[1];
+    const ggml_tensor * kernel = dst->src[0];
+    const ggml_tensor * offset = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+    GGML_ASSERT(ggml_is_contiguous_channels(src));    // [C_in W  H  N] in memory
+    GGML_ASSERT(ggml_is_contiguous_channels(kernel)   // [C_in KW KH C_out] in memory
+            || (kernel->ne[0] == 1 && kernel->ne[1] == 1));
+            
+    const int32_t stride_x = dst->op_params[0];
+    const int32_t stride_y = dst->op_params[1];
+    const int32_t pad_x    = dst->op_params[2];
+    const int32_t pad_y    = dst->op_params[3];
+
+    const int64_t c_in  = src->ne[2];    // number of input channels
+    const int64_t c_out = kernel->ne[3]; // number of kernels / output channels
+    const int64_t src_w = src->ne[0];
+    const int64_t src_h = src->ne[1];
+    const float * src_data = (const float *)src->data;
+    const int64_t knl_w = kernel->ne[0];
+    const int64_t knl_h = kernel->ne[1];
+    const int64_t knl_wh = knl_w * knl_h;
+    const float * knl_data = (const float *)kernel->data;
+    const int64_t dst_w = dst->ne[0];
+    const int64_t dst_h = dst->ne[1];
+    float       * dst_data = (float *)dst->data;
+
+    GGML_ASSERT(kernel->ne[2] == c_in);
+    GGML_ASSERT(offset->ne[2] == 2 * knl_w * knl_h);    // [2*kw*kh dst_w dst_h batch] in memory
+    GGML_ASSERT(!mask || mask->ne[2] == knl_w * knl_h);   // [kw*kh dst_w dst_h batch] in memory
+
+    int64_t n_patches = dst->ne[3] * dst_w * dst_h;
+
+    float * tmp = (float *)params->wdata; // temporary buffer for im2col result
+
+    for (int64_t patch_i = 0; patch_i < n_patches; ++patch_i) {
+        const int64_t b = patch_i / (dst_w * dst_h);
+        const int64_t dst_y = (patch_i / dst_w) % dst_h;
+        const int64_t dst_x = patch_i % dst_w;
+        const float * src_patch = (const float*)src->data + (b * src_w * src_h * c_in);
+        const float * off_patch = (const float*)offset->data
+            + (b * dst_w * dst_h + dst_y * dst_w + dst_x) * 2 * knl_wh;
+        const float * msk_patch = mask ? (const float*)mask->data
+            + (b * dst_w * dst_h + dst_y * dst_w + dst_x) * knl_wh : nullptr;
+        float * tmp_patch = tmp + patch_i * knl_w * knl_h * c_in;
+
+        for (int knl_y = 0; knl_y < knl_h; ++knl_y) {
+            for (int knl_x = 0; knl_x < knl_w; ++knl_x) {
+                int knl_i = knl_y * knl_w + knl_x;
+
+                float msk_val = 1.0f;
+                if (mask) {
+                    msk_val = msk_patch[knl_i];
+                }
+                float off_x = off_patch[knl_i * 2 + 1];
+                float off_y = off_patch[knl_i * 2 + 0];
+                float src_x = dst_x * stride_x + knl_x - pad_x + off_x;
+                float src_y = dst_y * stride_y + knl_y - pad_y + off_y;
+
+                for (int c_i = 0; c_i < c_in; ++c_i) {
+                    float val = msk_val * bilinear_interpolate(
+                        src_patch,
+                        src_w, src_h, c_in,
+                        src_x, src_y, c_i);
+                    tmp_patch[knl_y * knl_w * c_in + knl_x * c_in + c_i] = val;
+                }
+            }
+        }
+    } // for each patch
+    
+    ggml_call_mul_mat(params, n_patches, c_out, knl_w * knl_h * c_in, tmp, knl_data, dst_data);
+}
+    
 
 // ggml_compute_forward_conv_2d_dw
 
