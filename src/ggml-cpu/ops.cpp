@@ -6213,7 +6213,7 @@ void ggml_compute_forward_conv_2d_cwhn(
             const int64_t b = patch_i / (dst_w * dst_h);
             const int64_t dst_y = (patch_i / dst_w) % dst_h;
             const int64_t dst_x = patch_i % dst_w;
-            const float * src_patch = (const float*)src->data + (b * src_w * src_h * c_in);
+            const float * src_patch = src_data + (b * src_w * src_h * c_in);
             float * tmp_patch = tmp + ((patch_i % patches_per_batch) * knl_n);
 
             for (int64_t knl_y = 0; knl_y < knl_h; ++knl_y) {
@@ -6243,14 +6243,10 @@ void ggml_compute_forward_conv_2d_cwhn(
 
 // ggml_compute_forward_conv_2d_deform
 
-float bilinear_interpolate(
-        const float * data,
-        int64_t w, int64_t h, int64_t channels,
-        float x, float y, int64_t c) {
-
-    if (x <= -1 || x >= w || y <= -1 || y >= h) {
-        return 0.0f;
-    }
+void ggml_vec_bilinear_interpolate_f32(
+        int64_t n, float * dst, const float * src,
+        int64_t w, int64_t h,
+        float x, float y, float scale = 1.0f) {
 
     int64_t x0 = (int64_t)floorf(x);
     int64_t y0 = (int64_t)floorf(y);
@@ -6260,13 +6256,47 @@ float bilinear_interpolate(
     float dx = x - x0;
     float dy = y - y0;
 
-    float v00 = x0 >= 0 && y0 >= 0 ? data[(y0 * w + x0) * channels + c] : 0.0f;
-    float v01 = x1 <  w && y0 >= 0 ? data[(y0 * w + x1) * channels + c] : 0.0f;
-    float v10 = x0 >= 0 && y1 <  h ? data[(y1 * w + x0) * channels + c] : 0.0f;
-    float v11 = x1 <  w && y1 <  h ? data[(y1 * w + x1) * channels + c] : 0.0f;
+    const float * src00 = x0 >= 0 && y0 >= 0 ? src + (y0 * w + x0) * n : nullptr;
+    const float * src01 = x1 <  w && y0 >= 0 ? src + (y0 * w + x1) * n : nullptr;
+    const float * src10 = x0 >= 0 && y1 <  h ? src + (y1 * w + x0) * n : nullptr;
+    const float * src11 = x1 <  w && y1 <  h ? src + (y1 * w + x1) * n : nullptr;
 
-    return (v00 * (1.0f - dx) + v01 * dx) * (1.0f - dy)
-         + (v10 * (1.0f - dx) + v11 * dx) * dy;
+    int64_t n_pkg_end = 0;
+#ifdef GGML_SIMD
+    n_pkg_end = (n / GGML_F32_EPR) * GGML_F32_EPR;
+
+    GGML_F32_VEC zero = GGML_F32_VEC_ZERO;
+    GGML_F32_VEC one = GGML_F32_VEC_SET1(1.0f);
+    GGML_F32_VEC dx_vec = GGML_F32_VEC_SET1(dx);
+    GGML_F32_VEC dy_vec = GGML_F32_VEC_SET1(dy);
+    GGML_F32_VEC scale_vec = GGML_F32_VEC_SET1(scale);
+
+    for (int i = 0; i < n_pkg_end; i += GGML_F32_EPR) {
+        GGML_F32_VEC v00 = src00 ? GGML_F32_VEC_LOAD(src00 + i) : zero;
+        GGML_F32_VEC v01 = src01 ? GGML_F32_VEC_LOAD(src01 + i) : zero;
+        GGML_F32_VEC v10 = src10 ? GGML_F32_VEC_LOAD(src10 + i) : zero;
+        GGML_F32_VEC v11 = src11 ? GGML_F32_VEC_LOAD(src11 + i) : zero;
+
+        GGML_F32_VEC v0 = GGML_F32_VEC_ADD(
+            GGML_F32_VEC_MUL(v00, _mm256_sub_ps(one, dx_vec)), GGML_F32_VEC_MUL(v01, dx_vec));
+        GGML_F32_VEC v1 = GGML_F32_VEC_ADD(
+            GGML_F32_VEC_MUL(v10, _mm256_sub_ps(one, dx_vec)), GGML_F32_VEC_MUL(v11, dx_vec));
+        GGML_F32_VEC val = GGML_F32_VEC_ADD(
+            GGML_F32_VEC_MUL(v0, _mm256_sub_ps(one, dy_vec)), GGML_F32_VEC_MUL(v1, dy_vec));
+        GGML_F32_VEC_STORE(dst + i, GGML_F32_VEC_MUL(val, scale_vec));
+    }
+#endif
+
+    for (int i = n_pkg_end; i < n; ++i) {
+        float v00 = src00 ? src00[i] : 0.0f;
+        float v01 = src01 ? src01[i] : 0.0f;
+        float v10 = src10 ? src10[i] : 0.0f;
+        float v11 = src11 ? src11[i] : 0.0f;
+
+        float val = (v00 * (1.0f - dx) + v01 * dx) * (1.0f - dy)
+                  + (v10 * (1.0f - dx) + v11 * dx) * dy;
+        dst[i] = scale * val;
+    }
 }
 
 void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tensor * dst) {
@@ -6300,46 +6330,60 @@ void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tens
     GGML_ASSERT(offset->ne[2] == 2 * knl_w * knl_h);    // [2*kw*kh dst_w dst_h batch] in memory
     GGML_ASSERT(!mask || mask->ne[2] == knl_w * knl_h);   // [kw*kh dst_w dst_h batch] in memory
 
-    int64_t n_patches = dst->ne[3] * dst_w * dst_h;
+    const int64_t knl_n = c_in * knl_w * knl_h;
+    const int64_t patch_total = dst->ne[3] * dst_w * dst_h;
+    const int64_t patches_per_batch = GGML_IM2COL_WORK_SIZE / (knl_n * sizeof(float));
+    const int64_t batch_n = (patch_total + patches_per_batch - 1) / patches_per_batch;
 
+    GGML_ASSERT(params->wsize >= MIN(patch_total * knl_n * sizeof(float), GGML_IM2COL_WORK_SIZE));
     float * tmp = (float *)params->wdata; // temporary buffer for im2col result
 
-    for (int64_t patch_i = 0; patch_i < n_patches; ++patch_i) {
-        const int64_t b = patch_i / (dst_w * dst_h);
-        const int64_t dst_y = (patch_i / dst_w) % dst_h;
-        const int64_t dst_x = patch_i % dst_w;
-        const float * src_patch = (const float*)src->data + (b * src_w * src_h * c_in);
-        const float * off_patch = (const float*)offset->data
-            + (b * dst_w * dst_h + dst_y * dst_w + dst_x) * 2 * knl_wh;
-        const float * msk_patch = mask ? (const float*)mask->data
-            + (b * dst_w * dst_h + dst_y * dst_w + dst_x) * knl_wh : nullptr;
-        float * tmp_patch = tmp + patch_i * knl_w * knl_h * c_in;
+    for (int64_t batch_i = 0; batch_i < batch_n; ++batch_i) {
+        const int64_t batch_start = batch_i * patches_per_batch;
+        const int64_t batch_end = MIN(batch_start + patches_per_batch, patch_total);
+        const int64_t patch_n = batch_end - batch_start;
+        const int64_t patch_per_thread = (patch_n + params->nth - 1) / params->nth;
+        const int64_t patch_start = batch_start + params->ith * patch_per_thread;
+        const int64_t patch_end = MIN(patch_start + patch_per_thread, batch_end);
 
-        for (int knl_y = 0; knl_y < knl_h; ++knl_y) {
-            for (int knl_x = 0; knl_x < knl_w; ++knl_x) {
-                int knl_i = knl_y * knl_w + knl_x;
+        for (int64_t patch_i = patch_start; patch_i < patch_end; ++patch_i) {
+            const int64_t b = patch_i / (dst_w * dst_h);
+            const int64_t dst_y = (patch_i / dst_w) % dst_h;
+            const int64_t dst_x = patch_i % dst_w;
+            const float * src_batch = src_data + (b * src_w * src_h * c_in);
+            const float * off_patch = (const float*)offset->data + patch_i * 2 * knl_wh;
+            const float * msk_patch = mask ? (const float*)mask->data + patch_i * knl_wh : nullptr;
+            float * tmp_patch = tmp + (patch_i % patches_per_batch) * knl_n;
 
-                float msk_val = 1.0f;
-                if (mask) {
-                    msk_val = msk_patch[knl_i];
-                }
-                float off_x = off_patch[knl_i * 2 + 1];
-                float off_y = off_patch[knl_i * 2 + 0];
-                float src_x = dst_x * stride_x + knl_x - pad_x + off_x;
-                float src_y = dst_y * stride_y + knl_y - pad_y + off_y;
+            for (int knl_y = 0; knl_y < knl_h; ++knl_y) {
+                for (int knl_x = 0; knl_x < knl_w; ++knl_x) {
+                    int knl_i = knl_y * knl_w + knl_x;
 
-                for (int c_i = 0; c_i < c_in; ++c_i) {
-                    float val = msk_val * bilinear_interpolate(
-                        src_patch,
-                        src_w, src_h, c_in,
-                        src_x, src_y, c_i);
-                    tmp_patch[knl_y * knl_w * c_in + knl_x * c_in + c_i] = val;
+                    float msk_value = 1.0f;
+                    if (mask) {
+                        msk_value = msk_patch[knl_i];
+                    }
+                    float off_x = off_patch[knl_i * 2 + 1];
+                    float off_y = off_patch[knl_i * 2 + 0];
+                    float src_x = dst_x * stride_x + knl_x - pad_x + off_x;
+                    float src_y = dst_y * stride_y + knl_y - pad_y + off_y;
+
+                    if (src_x <= -1 || src_x >= src_w || src_y <= -1 || src_y >= src_h) {
+                        ggml_vec_set_f32(c_in, tmp_patch + knl_i * c_in, 0);
+                    } else {
+                        ggml_vec_bilinear_interpolate_f32(
+                            c_in, tmp_patch + knl_i * c_in, src_batch,
+                            src_w, src_h,
+                            src_x, src_y, msk_value);
+                    }
                 }
             }
-        }
-    } // for each patch
-    
-    ggml_call_mul_mat(params, n_patches, c_out, knl_w * knl_h * c_in, tmp, knl_data, dst_data);
+        } // for each patch
+        ggml_barrier(params->threadpool);
+        
+        float * dst_data_offset = dst_data + batch_start * c_out;
+        ggml_call_mul_mat(params, patch_n, c_out, knl_n, tmp, knl_data, dst_data_offset);
+    } // for each batch
 }
     
 

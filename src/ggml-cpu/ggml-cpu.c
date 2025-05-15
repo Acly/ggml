@@ -2284,10 +2284,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_CONV_TRANSPOSE_2D:
         case GGML_OP_CONV_2D:
         case GGML_OP_CONV_2D_DW:
+        case GGML_OP_CONV_2D_DEFORM:
             {
                 n_tasks = n_threads;
             } break;
-        case GGML_OP_CONV_2D_DEFORM://TODO
         case GGML_OP_POOL_1D:
         case GGML_OP_POOL_2D:
         case GGML_OP_POOL_2D_BACK:

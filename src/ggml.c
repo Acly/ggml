@@ -4162,7 +4162,7 @@ struct ggml_tensor * ggml_conv_2d_deform(
         // Memory layout of offset: [KH*KW*2 OW OH N], permuted to [OW OH KH*KW*2 N]
         // Memory layout of mask:   [KH*KW   OW OH N], permuted to [OW OH KH*KW   N]
         GGML_ASSERT(ggml_is_contiguous_channels(offset));
-        GGML_ASSERT(!mask || ggml_is_contiguous_channels(mask));
+        GGML_ASSERT(!mask || ggml_is_contiguous_channels(mask) || mask->ne[2] == 1);
         ggml_set_permuted_strides(result, 2, 0, 1, 3);
     }
 
