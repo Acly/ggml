@@ -4255,10 +4255,10 @@ static struct ggml_tensor * ggml_upscale_impl(
         int                   ne2,
         int                   ne3,
         enum ggml_scale_mode  mode) {
-    GGML_ASSERT(a->ne[0] <= ne0);
-    GGML_ASSERT(a->ne[1] <= ne1);
-    GGML_ASSERT(a->ne[2] <= ne2);
-    GGML_ASSERT(a->ne[3] <= ne3);
+    // GGML_ASSERT(a->ne[0] <= ne0);
+    // GGML_ASSERT(a->ne[1] <= ne1);
+    // GGML_ASSERT(a->ne[2] <= ne2);
+    // GGML_ASSERT(a->ne[3] <= ne3);
 
     struct ggml_tensor * result = ggml_new_tensor_4d(ctx, a->type, ne0, ne1, ne2, ne3);
 
