@@ -515,6 +515,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_conv2d_dw_whcn_f32;
     vk_pipeline pipeline_conv2d_dw_cwhn_f32;
     vk_pipeline pipeline_conv_transpose_2d_f32;
+    vk_pipeline pipeline_roll_f32;
 
     // [2][2][2] is for {f16acc,f32acc}x{large,small_rows}x{unaligned, aligned}
     vk_pipeline pipeline_flash_attn_f32_f16_cm2[GGML_TYPE_COUNT][FA_HEAD_SIZE_COUNT][2][2][2];
@@ -3233,6 +3234,8 @@ static void ggml_vk_load_shaders(vk_device& device) {
     ggml_vk_create_pipeline(device, device->pipeline_conv2d_dw_cwhn_f32, "conv2d_dw_cwhn_f32", conv2d_dw_cwhn_f32_len, conv2d_dw_cwhn_f32_data, "main", 3, sizeof(vk_op_conv2d_dw_push_constants), {512, 1, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_2d_f32, "conv_transpose_2d_f32", conv_transpose_2d_f32_len, conv_transpose_2d_f32_data, "main", 3, sizeof(vk_op_conv_transpose_2d_push_constants), {32, 8, 1}, {}, 1);
+
+    ggml_vk_create_pipeline(device, device->pipeline_roll_f32, "roll_f32", roll_f32_len, roll_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
 
     for (auto &c : compiles) {
         c.wait();
@@ -7149,6 +7152,11 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
             return ctx->device->pipeline_pool2d_f32;
         }
         return nullptr;
+    case GGML_OP_ROLL:
+        if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            return ctx->device->pipeline_roll_f32;
+        }
+        return nullptr;
     case GGML_OP_RWKV_WKV6:
         if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
             return ctx->device->pipeline_rwkv_wkv6_f32;
@@ -7564,6 +7572,7 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     case GGML_OP_GLU:
     case GGML_OP_CONV_2D_DW:
     case GGML_OP_CONV_TRANSPOSE_2D:
+    case GGML_OP_ROLL:
         {
             uint32_t ne = ggml_nelements(dst);
             if (op == GGML_OP_CPY && ggml_is_quantized(src0->type) && ggml_is_quantized(dst->type)) {
@@ -8516,6 +8525,39 @@ static void ggml_vk_leaky_relu(ggml_backend_vk_context * ctx, vk_context& subctx
     const float * op_params = (const float *)dst->op_params;
     ggml_vk_op_f32<vk_op_push_constants>(ctx, subctx, src0, nullptr, nullptr, dst, GGML_OP_LEAKY_RELU, { (uint32_t)ggml_nelements(src0), 0, op_params[0], 0.0f }, dryrun);
 }
+
+static void ggml_vk_roll(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst, bool dryrun = false) {
+    const int32_t s0 = dst->op_params[0];
+    const int32_t s1 = dst->op_params[1];
+    const int32_t s2 = dst->op_params[2];
+    const int32_t s3 = dst->op_params[3];
+    const uint32_t s01_packed = ((s0 + 0x8000) << 16) | (s1 + 0x8000);
+    const uint32_t s23_packed = ((s2 + 0x8000) << 16) | (s3 + 0x8000);
+
+    vk_op_unary_push_constants p{};
+    p.ne = ggml_nelements(dst);
+    p.ne00 = src0->ne[0];
+    p.ne01 = src0->ne[1];
+    p.ne02 = src0->ne[2];
+    p.ne03 = src0->ne[3];
+    p.nb00 = src0->nb[0] / ggml_type_size(src0->type);
+    p.nb01 = src0->nb[1] / ggml_type_size(src0->type);
+    p.nb02 = src0->nb[2] / ggml_type_size(src0->type);
+    p.nb03 = src0->nb[3] / ggml_type_size(src0->type);
+    p.ne10 = dst->ne[0];
+    p.ne11 = dst->ne[1];
+    p.ne12 = dst->ne[2];
+    p.ne13 = dst->ne[3];
+    p.nb10 = dst->nb[0] / ggml_type_size(dst->type);
+    p.nb11 = dst->nb[1] / ggml_type_size(dst->type);
+    p.nb12 = dst->nb[2] / ggml_type_size(dst->type);
+    p.nb13 = dst->nb[3] / ggml_type_size(dst->type);
+    memcpy(&p.param1, &s01_packed, sizeof(float));
+    memcpy(&p.param2, &s23_packed, sizeof(float));
+
+    ggml_vk_op_f32(ctx, subctx, src0, nullptr, nullptr, dst, GGML_OP_ROLL, std::move(p), dryrun);
+}
+    
 
 #ifdef GGML_VULKAN_RUN_TESTS
 static void ggml_vk_print_matrix_area(const void * data, ggml_type type, int ne0, int ne1, int i0, int i1, int i2) {
@@ -9561,6 +9603,7 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
     case GGML_OP_CONV_2D:
     case GGML_OP_CONV_2D_DW:
     case GGML_OP_CONV_TRANSPOSE_2D:
+    case GGML_OP_ROLL:
     case GGML_OP_RWKV_WKV6:
     case GGML_OP_RWKV_WKV7:
     case GGML_OP_LEAKY_RELU:
@@ -9865,6 +9908,11 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
 
         break;
 
+    case GGML_OP_ROLL:
+        ggml_vk_roll(ctx, compute_ctx, src0, node, dryrun);
+
+        break;
+
     case GGML_OP_RWKV_WKV6:
         ggml_vk_rwkv_wkv6(ctx, compute_ctx, node, dryrun);
 
@@ -9975,6 +10023,7 @@ static bool ggml_vk_compute_forward(ggml_backend_vk_context * ctx, ggml_cgraph *
     case GGML_OP_CONV_2D:
     case GGML_OP_CONV_2D_DW:
     case GGML_OP_CONV_TRANSPOSE_2D:
+    case GGML_OP_ROLL:
     case GGML_OP_RWKV_WKV6:
     case GGML_OP_RWKV_WKV7:
     case GGML_OP_LEAKY_RELU:
@@ -11131,6 +11180,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
         case GGML_OP_CONV_2D_DW:
         case GGML_OP_CONV_TRANSPOSE_2D:
         case GGML_OP_POOL_2D:
+        case GGML_OP_ROLL:
         case GGML_OP_RWKV_WKV6:
         case GGML_OP_RWKV_WKV7:
         case GGML_OP_LEAKY_RELU:
