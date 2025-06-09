@@ -7072,7 +7072,8 @@ static void ggml_compute_forward_conv_2d_cwhn(
     // Rewrite the convolution as a matrix multiplication (im2col)
     const int64_t knl_n = c_in * knl_w * knl_h;
     const int64_t patch_total = dst->ne[3] * dst_w * dst_h;
-    const int64_t patches_per_batch = GGML_IM2COL_WORK_SIZE / (knl_n * sizeof(float));
+    const int64_t batch_size = GGML_IM2COL_WORK_SIZE / (knl_n * sizeof(float));
+    const int64_t patches_per_batch = batch_size > 8 ? (batch_size / 8) * 8 : batch_size;
     const int64_t batch_n = (patch_total + patches_per_batch - 1) / patches_per_batch;
 
     GGML_ASSERT(params->wsize >= MIN(patch_total * knl_n * sizeof(float), GGML_IM2COL_WORK_SIZE));
@@ -7319,7 +7320,8 @@ void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tens
 
     const int64_t knl_n = c_in * knl_w * knl_h;
     const int64_t patch_total = dst->ne[3] * dst_w * dst_h;
-    const int64_t patches_per_batch = GGML_IM2COL_WORK_SIZE / (knl_n * sizeof(float));
+    const int64_t batch_size = GGML_IM2COL_WORK_SIZE / (knl_n * sizeof(float));
+    const int64_t patches_per_batch = batch_size > 8 ? (batch_size / 8) * 8 : batch_size;
     const int64_t batch_n = (patch_total + patches_per_batch - 1) / patches_per_batch;
 
     GGML_ASSERT(params->wsize >= MIN(patch_total * knl_n * sizeof(float), GGML_IM2COL_WORK_SIZE));
