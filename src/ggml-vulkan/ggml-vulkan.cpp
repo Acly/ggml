@@ -1868,39 +1868,6 @@ static size_t ggml_vk_align_size(size_t width, size_t align) {
     return CEIL_DIV(width, align) * align;
 }
 
-static size_t ggml_vk_reserve_temp_buffer(ggml_backend_vk_context * ctx, size_t size) {
-    size = ggml_vk_align_size(size, ctx->device->properties.limits.minStorageBufferOffsetAlignment);
-    ctx->scratch_size = std::max(ctx->scratch_size, size);
-    return size;
-}
-
-struct ggml_vk_temp_buffer {
-    ggml_backend_vk_buffer_context context{};
-    ggml_backend_buffer buffer{};
-    int64_t offset = 0;
-    int64_t align = 0;
-
-    explicit ggml_vk_temp_buffer(ggml_backend_vk_context * ctx) {
-        context.device = ctx->device;
-        context.dev_buffer = ctx->scratch_buffer;
-        buffer.context = &context;
-        buffer.size = ctx->scratch_size;
-        align = ctx->device->properties.limits.minStorageBufferOffsetAlignment;
-    }
-
-    ggml_vk_temp_buffer(const ggml_vk_temp_buffer &) = delete;
-    ggml_vk_temp_buffer & operator=(const ggml_vk_temp_buffer &) = delete;
-};
-
-static void ggml_vk_use_buffer(ggml_tensor * tensor, ggml_vk_temp_buffer & buffer) {
-    size_t size = ggml_nbytes(tensor);
-    GGML_ASSERT(buffer.offset + size <= buffer.buffer.size);
-
-    tensor->buffer = &buffer.buffer;
-    tensor->data = (void *)((int64_t)vk_ptr_base + buffer.offset);
-    buffer.offset += ggml_vk_align_size(size, buffer.align);
-}
-
 static void ggml_vk_sync_buffers(vk_context& ctx) {
     VK_LOG_DEBUG("ggml_vk_sync_buffers()");
 
@@ -7595,7 +7562,6 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     case GGML_OP_UNARY:
     case GGML_OP_GLU:
     case GGML_OP_CONV_2D_DW:
-    case GGML_OP_CONV_TRANSPOSE_2D:
     case GGML_OP_ROLL:
         {
             uint32_t ne = ggml_nelements(dst);
