@@ -505,6 +505,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_count_equal_i32;
     vk_pipeline pipeline_im2col_f32, pipeline_im2col_f32_f16;
     vk_pipeline pipeline_im2col_cwhn_f32;
+    vk_pipeline pipeline_im2col_deform_f32;
     vk_pipeline pipeline_timestep_embedding_f32;
     vk_pipeline pipeline_conv_transpose_1d_f32;
     vk_pipeline pipeline_pool2d_f32;
@@ -1161,8 +1162,10 @@ struct ggml_backend_vk_context {
 
     size_t semaphore_idx, event_idx;
     ggml_vk_garbage_collector gc;
-    size_t prealloc_size_x, prealloc_size_y, prealloc_size_split_k, scratch_size;
-    vk_buffer prealloc_x, prealloc_y, prealloc_split_k, scratch_buffer;
+    size_t prealloc_size_x, prealloc_size_y, prealloc_size_split_k;
+    vk_buffer prealloc_x, prealloc_y, prealloc_split_k;
+    size_t prealloc_size_im2col;
+    vk_buffer prealloc_im2col;
     vk::Fence fence, almost_ready_fence;
     bool almost_ready_fence_pending {};
 
@@ -1200,9 +1203,7 @@ struct ggml_backend_vk_buffer_context {
     vk_buffer dev_buffer;
     std::string name;
 
-    ggml_backend_vk_buffer_context() = default;
-
-    ggml_backend_vk_buffer_context(vk_device_ref device, vk_buffer&& dev_buffer, std::string& name) :
+    ggml_backend_vk_buffer_context(vk_device_ref device, vk_buffer&& dev_buffer, const std::string& name) :
         device(device),
         dev_buffer(dev_buffer),
         name(name) {
@@ -3153,6 +3154,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
         ggml_vk_create_pipeline(device, device->pipeline_im2col_f32_f16, "im2col_f32_f16", im2col_f32_f16_len, im2col_f32_f16_data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);
     }
     ggml_vk_create_pipeline(device, device->pipeline_im2col_cwhn_f32, "im2col_cwhn_f32", im2col_cwhn_f32_len, im2col_cwhn_f32_data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_im2col_deform_f32, "im2col_deform_f32", im2col_deform_f32_len, im2col_deform_f32_data, "main", 4, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);
 
     ggml_vk_create_pipeline(device, device->pipeline_timestep_embedding_f32, "timestep_embedding_f32", timestep_embedding_f32_len, timestep_embedding_f32_data, "main", 2, sizeof(vk_op_timestep_embedding_push_constants), {256, 1, 1}, {}, 1);
 
@@ -4275,7 +4277,7 @@ static void ggml_vk_init(ggml_backend_vk_context * ctx, size_t idx) {
     ctx->prealloc_size_x = 0;
     ctx->prealloc_size_y = 0;
     ctx->prealloc_size_split_k = 0;
-    ctx->scratch_size = 0;
+    ctx->prealloc_size_im2col = 0;
 
     ctx->fence = ctx->device->device.createFence({});
     ctx->almost_ready_fence = ctx->device->device.createFence({});
@@ -8543,6 +8545,106 @@ static void ggml_vk_conv_transpose_2d(ggml_backend_vk_context * ctx, vk_context&
     ggml_vk_op_f32(ctx, subctx, src0, src1, nullptr, dst, GGML_OP_CONV_TRANSPOSE_2D, std::move(p), dryrun);
 }
 
+static vk_subbuffer ggml_vk_tensor_subbuffer(vk_device& device, const ggml_tensor * tensor) {
+    vk_subbuffer result;
+    if (device->uma) {
+        ggml_vk_host_get(device, tensor->data, result.buffer, result.offset);
+    }
+    if (!result.buffer) {
+        auto buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
+        result.buffer = buf_ctx->dev_buffer;
+        result.offset = vk_tensor_offset(tensor) + tensor->view_offs;
+    }
+    result.size = ggml_nbytes(tensor);
+    return result;
+}
+
+static void ggml_vk_set_shape(ggml_tensor& t, uint64_t ne0, uint64_t ne1 = 1, uint64_t ne2 = 1, uint64_t ne3 = 1) {
+    t.ne[0] = ne0;
+    t.ne[1] = ne1;
+    t.ne[2] = ne2;
+    t.ne[3] = ne3;
+
+    t.nb[0] = ggml_type_size(t.type);
+    t.nb[1] = t.ne[0] * t.nb[0];
+    t.nb[2] = t.ne[1] * t.nb[1];
+    t.nb[3] = t.ne[2] * t.nb[2];
+}
+
+static void ggml_vk_conv_2d_deform(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst, bool dryrun = false) {
+    vk_device& device = ctx->device;
+    vk_op_im2col_push_constants p{};
+    p.batch_offset = src1->nb[3] / ggml_type_size(src1->type);
+    p.offset_delta = src1->nb[2] / ggml_type_size(src1->type);
+    p.IC = src1->ne[2];
+    p.IW = src1->ne[0];
+    p.IH = src1->ne[1];
+    p.OW = dst->ne[0];
+    p.OH = dst->ne[1];
+    p.KW = src0->ne[0];
+    p.KH = src0->ne[1];
+    p.pelements = p.OW * p.KW * p.KH * (ggml_is_contiguous(src1) ? 1 : p.IC);
+    p.CHW = p.IC * p.KH * p.KW;
+    p.s0 = dst->op_params[0];
+    p.s1 = dst->op_params[1];
+    p.p0 = dst->op_params[2];
+    p.p1 = dst->op_params[3];
+    p.d0 = 1;
+    p.d1 = 1;
+    const uint32_t OC = src0->ne[3];
+    const uint32_t B = dst->ne[3];
+    const auto elements = std::array{
+        p.IC * p.OW * p.KW * p.KH,
+        p.OH * B,
+        1u};
+
+    if (dryrun) {
+        size_t im2col_size = elements[0] * elements[1] * ggml_type_size(src1->type);
+        ctx->prealloc_size_im2col = std::max(ctx->prealloc_size_im2col, im2col_size);
+        ggml_pipeline_request_descriptor_sets(device, device->pipeline_im2col_deform_f32, 1);
+    }
+
+    // im2col
+
+    vk_subbuffer x_buf = ggml_vk_tensor_subbuffer(ctx->device, src1);
+    vk_subbuffer offset_buf = ggml_vk_tensor_subbuffer(ctx->device, src2);
+    vk_subbuffer mask_buf = ggml_vk_tensor_subbuffer(ctx->device, src3);
+    vk_subbuffer tmp_buf = ggml_vk_subbuffer(ctx->prealloc_im2col);
+
+    if (!dryrun) {
+        ggml_vk_dispatch_pipeline(ctx, subctx, ctx->device->pipeline_im2col_deform_f32,
+            {x_buf, offset_buf, mask_buf, tmp_buf},
+            sizeof(vk_op_im2col_push_constants), &p, elements);
+        ggml_vk_sync_buffers(subctx);
+    }
+
+    // mul_mat
+
+    ggml_backend_vk_buffer_context tmp_buf_context{vk_device_ref(device), vk_buffer(ctx->prealloc_im2col), "im2col"};
+    ggml_backend_buffer tmp_buffer{};
+    tmp_buffer.context = &tmp_buf_context;
+    tmp_buffer.size = ctx->prealloc_size_im2col;
+
+    const int64_t m = p.OW * p.OH * B;
+    const int64_t n = OC;
+    const int64_t k = p.IC * p.KH * p.KW;
+
+    ggml_tensor cols{GGML_TYPE_F32, &tmp_buffer};
+    ggml_vk_set_shape(cols, k, m);
+    cols.data = vk_ptr_base;
+
+    ggml_tensor knl = *src0;
+    ggml_vk_set_shape(knl, k, n);
+
+    ggml_tensor mm = *dst;
+    ggml_vk_set_shape(mm, n, m);
+    mm.op = GGML_OP_MUL_MAT;
+    mm.src[0] = &knl;
+    mm.src[1] = &cols;
+    
+    ggml_vk_mul_mat(ctx, subctx, &knl, &cols, &mm, dryrun);
+}
+
 static void ggml_vk_leaky_relu(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst, bool dryrun = false) {
     const float * op_params = (const float *)dst->op_params;
     ggml_vk_op_f32<vk_op_push_constants>(ctx, subctx, src0, nullptr, nullptr, dst, GGML_OP_LEAKY_RELU, { (uint32_t)ggml_nelements(src0), 0, op_params[0], 0.0f }, dryrun);
@@ -9517,13 +9619,13 @@ static void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx) {
         }
         ctx->prealloc_split_k = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_split_k);
     }
-    if (ctx->scratch_buffer == nullptr || (ctx->scratch_size > 0 && ctx->scratch_buffer->size < ctx->scratch_size)) {
-        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(scratch_size: " << ctx->scratch_size << ")");
+    if (ctx->prealloc_im2col == nullptr || (ctx->prealloc_size_im2col > 0 && ctx->prealloc_im2col->size < ctx->prealloc_size_im2col)) {
+        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(im2col_size: " << ctx->prealloc_size_im2col << ")");
         // Resize buffer
-        if (ctx->scratch_buffer != nullptr) {
-            ggml_vk_destroy_buffer(ctx->scratch_buffer);
+        if (ctx->prealloc_im2col != nullptr) {
+            ggml_vk_destroy_buffer(ctx->prealloc_im2col);
         }
-        ctx->scratch_buffer = ggml_vk_create_buffer_device(ctx->device, ctx->scratch_size);
+        ctx->prealloc_im2col = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_im2col);
     }
 }
 
@@ -9624,6 +9726,7 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
     case GGML_OP_POOL_2D:
     case GGML_OP_CONV_2D:
     case GGML_OP_CONV_2D_DW:
+    case GGML_OP_CONV_2D_DEFORM:
     case GGML_OP_CONV_TRANSPOSE_2D:
     case GGML_OP_ROLL:
     case GGML_OP_RWKV_WKV6:
@@ -9908,6 +10011,10 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         ggml_vk_conv_2d_dw(ctx, compute_ctx, src0, src1, node, dryrun);
 
         break;
+    case GGML_OP_CONV_2D_DEFORM:
+        ggml_vk_conv_2d_deform(ctx, compute_ctx, src0, src1, src2, src3, node, dryrun);
+
+        break;
     case GGML_OP_CONV_TRANSPOSE_2D:
         ggml_vk_conv_transpose_2d(ctx, compute_ctx, src0, src1, node, dryrun);
 
@@ -10044,6 +10151,7 @@ static bool ggml_vk_compute_forward(ggml_backend_vk_context * ctx, ggml_cgraph *
     case GGML_OP_POOL_2D:
     case GGML_OP_CONV_2D:
     case GGML_OP_CONV_2D_DW:
+    case GGML_OP_CONV_2D_DEFORM:
     case GGML_OP_CONV_TRANSPOSE_2D:
     case GGML_OP_ROLL:
     case GGML_OP_RWKV_WKV6:
@@ -11200,6 +11308,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
         case GGML_OP_IM2COL:
         case GGML_OP_TIMESTEP_EMBEDDING:
         case GGML_OP_CONV_2D_DW:
+        case GGML_OP_CONV_2D_DEFORM:
         case GGML_OP_CONV_TRANSPOSE_2D:
         case GGML_OP_POOL_2D:
         case GGML_OP_ROLL:
