@@ -7339,19 +7339,16 @@ void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tens
             const int64_t b = patch_i / (dst_w * dst_h);
             const int64_t dst_y = (patch_i / dst_w) % dst_h;
             const int64_t dst_x = patch_i % dst_w;
+            const int64_t dst_coord = dst_y * dst_w + dst_x;
             const float * src_batch = src_data + (b * src_w * src_h * c_in);
-            const float * off_patch = (const float*)offset->data + patch_i * 2 * knl_wh;
-            const float * msk_patch = mask ? (const float*)mask->data + patch_i * knl_wh : nullptr;
+            const float * off_patch = (const float*)offset->data + dst_coord * knl_wh * 2;
+            const float * msk_patch = mask ? (const float*)mask->data + dst_coord * knl_wh : nullptr;
             float * tmp_patch = tmp + (patch_i % patches_per_batch) * knl_n;
 
             for (int knl_y = 0; knl_y < knl_h; ++knl_y) {
                 for (int knl_x = 0; knl_x < knl_w; ++knl_x) {
                     int knl_i = knl_y * knl_w + knl_x;
 
-                    float msk_value = 1.0f;
-                    if (mask) {
-                        msk_value = msk_patch[knl_i];
-                    }
                     float off_x = off_patch[knl_i * 2 + 1];
                     float off_y = off_patch[knl_i * 2 + 0];
                     float src_x = dst_x * stride_x + knl_x - pad_x + off_x;
@@ -7360,10 +7357,11 @@ void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tens
                     if (src_x <= -1 || src_x >= src_w || src_y <= -1 || src_y >= src_h) {
                         ggml_vec_set_f32(c_in, tmp_patch + knl_i * c_in, 0);
                     } else {
+                        float weight = mask ? msk_patch[knl_i] : 1.0f;
                         ggml_vec_bilinear_interpolate_f32(
                             c_in, tmp_patch + knl_i * c_in, src_batch,
                             src_w, src_h,
-                            src_x, src_y, msk_value);
+                            src_x, src_y, weight);
                     }
                 }
             }
