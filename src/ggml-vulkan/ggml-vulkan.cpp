@@ -23,6 +23,7 @@
 #include <mutex>
 #include <future>
 #include <thread>
+#include <fstream>
 
 #if defined(_MSC_VER)
 # define NOMINMAX 1
@@ -1325,6 +1326,27 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
     GGML_ASSERT(parameter_count > 0);
     GGML_ASSERT(parameter_count <= MAX_PARAMETER_COUNT);
     GGML_ASSERT(wg_denoms[0] > 0 && wg_denoms[1] > 0 && wg_denoms[2] > 0); // NOLINT
+
+    std::vector<uint32_t> spv_storage;
+    if (spv_size == 0 || spv_data == nullptr) {
+        std::string filepath = std::string(GGML_VK_SHADER_DIR) + "/" + pipeline->name + ".spv";
+        VK_LOG_DEBUG("ggml_vk_create_pipeline: loading shader from " << filepath);
+        std::ifstream file(filepath, std::ios::binary | std::ios::in | std::ios::ate);
+        if (!file.is_open()) {
+            std::cerr << "ggml_vulkan: Failed to open shader file: " << filepath << std::endl;
+            throw std::runtime_error("Failed to open shader file");
+        }
+        spv_size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        spv_storage.resize((spv_size + sizeof(uint32_t) - 1) / sizeof(uint32_t));
+        file.read(reinterpret_cast<char *>(spv_storage.data()), spv_size);
+        if (!file) {
+            std::cerr << "ggml_vulkan: Failed to read shader file: " << filepath << std::endl;
+            throw std::runtime_error("Failed to read shader file");
+        }
+        file.close();
+        spv_data = spv_storage.data();
+    }
 
     vk::ShaderModuleCreateInfo shader_module_create_info({}, spv_size, reinterpret_cast<const uint32_t *>(spv_data));
     pipeline->shader_module = device->device.createShaderModule(shader_module_create_info);

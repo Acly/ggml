@@ -166,6 +166,8 @@ if (Vulkan_FOUND)
 
     file(GLOB _ggml_vk_shader_files CONFIGURE_DEPENDS "${_ggml_vk_input_dir}/*.comp")
 
+    target_compile_definitions(ggml-vulkan PRIVATE GGML_VK_SHADER_DIR="${_ggml_vk_output_dir}")
+
     # Because external projects do not provide source-level tracking,
     # the vulkan-shaders-gen sources need to be explicitly added to
     # ensure that changes will cascade into shader re-generation.
