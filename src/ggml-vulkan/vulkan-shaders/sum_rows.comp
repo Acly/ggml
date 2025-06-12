@@ -32,6 +32,6 @@ void main() {
     }
 
     if (col == 0) {
-        data_d[row] = D_TYPE(tmp[0]);
+        data_d[row] = D_TYPE(tmp[0] * p.param1);
     }
 }
