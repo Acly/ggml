@@ -989,6 +989,12 @@ extern "C" {
             struct ggml_tensor  * b,
             int                   dim);
 
+    GGML_API struct ggml_tensor * ggml_concat_n(
+            struct ggml_context * ctx,
+            struct ggml_tensor ** tensors,   // array of pointers to tensors
+            int                   n_tensors, // number of tensors in the array
+            int                   dim);      // dimension to concatenate along
+
     GGML_API struct ggml_tensor * ggml_abs(
             struct ggml_context * ctx,
             struct ggml_tensor  * a);

@@ -2381,31 +2381,49 @@ struct ggml_tensor * ggml_repeat_back(
 // ggml_concat
 
 struct ggml_tensor * ggml_concat(
-    struct ggml_context * ctx,
-    struct ggml_tensor  * a,
-    struct ggml_tensor  * b,
-    int                   dim) {
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        int                   dim) {
+
+    struct ggml_tensor * tensors[2] = { a, b };
+    return ggml_concat_n(ctx, tensors, 2, dim);
+}
+
+struct ggml_tensor * ggml_concat_n(
+        struct ggml_context * ctx,
+        struct ggml_tensor ** tensors,
+        int                   n_tensors,
+        int                   dim) {
     GGML_ASSERT(dim >= 0 && dim < GGML_MAX_DIMS);
-    GGML_ASSERT(a->type == b->type);
+    GGML_ASSERT(n_tensors > 1 && n_tensors <= GGML_MAX_SRC);
+
+    enum ggml_type type = tensors[0]->type;
+    GGML_ASSERT(tensors[0]->nb[0] == ggml_type_size(type));
 
     int64_t ne[GGML_MAX_DIMS];
-    for (int d = 0; d < GGML_MAX_DIMS; ++d) {
-        if (d == dim) {
-            ne[d] = a->ne[d] + b->ne[d];
-            continue;
+    memcpy(ne, tensors[0]->ne, sizeof(ne));
+
+    for (int i = 1; i < n_tensors; ++i) {
+        GGML_ASSERT(tensors[i]->type == type);
+        GGML_ASSERT(tensors[i]->nb[0] == ggml_type_size(type));
+        for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+            if (d == dim) {
+                ne[d] += tensors[i]->ne[d];
+            } else {
+                GGML_ASSERT(tensors[i]->ne[d] == ne[d]);
+            }
         }
-        GGML_ASSERT(a->ne[d] == b->ne[d]);
-        ne[d] = a->ne[d];
     }
 
-    struct ggml_tensor * result = ggml_new_tensor(ctx, a->type, GGML_MAX_DIMS, ne);
+    struct ggml_tensor * result = ggml_new_tensor(ctx, type, GGML_MAX_DIMS, ne);
 
     ggml_set_op_params_i32(result, 0, dim);
 
-    result->op     = GGML_OP_CONCAT;
-    result->src[0] = a;
-    result->src[1] = b;
-
+    result->op = GGML_OP_CONCAT;
+    for (int i = 0; i < n_tensors; ++i) {
+        result->src[i] = tensors[i];
+    }
     return result;
 }
 
