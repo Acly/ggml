@@ -51,8 +51,6 @@
 #include <windows.h>
 #endif
 
-#pragma optimize("", off)
-
 #define UNUSED GGML_UNUSED
 
 #if defined(_MSC_VER)
@@ -232,7 +230,9 @@ void ggml_abort(const char * file, int line, const char * fmt, ...) {
         ggml_print_backtrace();
     }
 
+#if defined(_MSC_VER)
     __debugbreak();
+#endif
     abort();
 }
 

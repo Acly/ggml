@@ -101,8 +101,6 @@ static bool is_pow2(uint32_t x) { return x > 1 && (x & (x-1)) == 0; }
 #define VK_LOG_DEBUG(msg) ((void) 0)
 #endif // GGML_VULKAN_DEBUG
 
-#pragma optimize("", off)
-
 struct ggml_backend_vk_context;
 
 #define MAX_PARAMETER_COUNT 8

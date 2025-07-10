@@ -7091,7 +7091,7 @@ void ggml_vec_bilinear_interpolate_f32(
     const float * src11 = x1 <  w && y1 <  h ? src + (y1 * w + x1) * n : nullptr;
 
     int64_t n_pkg_end = 0;
-#ifdef GGML_SIMD
+#if defined(__AVX__) && GGML_F32_EPR == 8
     n_pkg_end = (n / GGML_F32_EPR) * GGML_F32_EPR;
 
     GGML_F32_VEC zero = GGML_F32_VEC_ZERO;
