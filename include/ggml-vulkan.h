@@ -24,6 +24,8 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_vk_host_buffer_type(voi
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_vk_reg(void);
 
+typedef bool (*ggml_backend_dev_supports_f16_t)(ggml_backend_dev_t);
+
 #ifdef  __cplusplus
 }
 #endif

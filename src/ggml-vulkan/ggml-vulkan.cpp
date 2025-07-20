@@ -10992,6 +10992,12 @@ static void ggml_backend_vk_device_get_props(ggml_backend_dev_t dev, struct ggml
     };
 }
 
+static bool ggml_backend_dev_vk_supports_f16(ggml_backend_dev_t dev) {
+    ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
+    auto device = ggml_vk_get_device(ctx->device);
+    return device->fp16;
+}
+
 static ggml_backend_t ggml_backend_vk_device_init(ggml_backend_dev_t dev, const char * params) {
     UNUSED(params);
     ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
@@ -11409,11 +11415,19 @@ static ggml_backend_dev_t ggml_backend_vk_reg_get_device(ggml_backend_reg_t reg,
     return devices[device];
 }
 
+static void * ggml_backend_vk_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+    UNUSED(reg);
+    if (std::string_view(name) == "ggml_backend_dev_supports_f16") {
+        return (void *)ggml_backend_dev_vk_supports_f16;
+    }
+    return nullptr;
+}
+
 static const struct ggml_backend_reg_i ggml_backend_vk_reg_i = {
     /* .get_name         = */ ggml_backend_vk_reg_get_name,
     /* .get_device_count = */ ggml_backend_vk_reg_get_device_count,
     /* .get_device       = */ ggml_backend_vk_reg_get_device,
-    /* .get_proc_address = */ NULL,
+    /* .get_proc_address = */ ggml_backend_vk_reg_get_proc_address,
 };
 
 ggml_backend_reg_t ggml_backend_vk_reg() {
