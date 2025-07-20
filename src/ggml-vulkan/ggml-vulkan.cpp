@@ -516,7 +516,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_conv2d_dw_cwhn_f32;
     vk_pipeline pipeline_conv2d_dw_whcn_f16_f32;
     vk_pipeline pipeline_conv2d_dw_cwhn_f16_f32;
-    vk_pipeline pipeline_conv_transpose_2d_f32;
+    vk_pipeline pipeline_conv_transpose_2d_f32, pipeline_conv_transpose_2d_f16_f32;
     vk_pipeline pipeline_roll_f32;
 
     // [2][2][2] is for {f16acc,f32acc}x{large,small_rows}x{unaligned, aligned}
@@ -3227,6 +3227,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
     ggml_vk_create_pipeline(device, device->pipeline_conv2d_dw_cwhn_f16_f32, "conv2d_dw_cwhn_f16_f32", conv2d_dw_cwhn_f16_f32_len, conv2d_dw_cwhn_f16_f32_data, "main", 3, sizeof(vk_op_conv2d_dw_push_constants), {512, 1, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_2d_f32, "conv_transpose_2d_f32", conv_transpose_2d_f32_len, conv_transpose_2d_f32_data, "main", 3, sizeof(vk_op_conv_transpose_2d_push_constants), {32, 8, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_2d_f16_f32, "conv_transpose_2d_f16_f32", conv_transpose_2d_f16_f32_len, conv_transpose_2d_f16_f32_data, "main", 3, sizeof(vk_op_conv_transpose_2d_push_constants), {32, 8, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_roll_f32, "roll_f32", roll_f32_len, roll_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
 
@@ -7219,6 +7220,8 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
     case GGML_OP_CONV_TRANSPOSE_2D:
         if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
             return ctx->device->pipeline_conv_transpose_2d_f32;
+        } else if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
+            return ctx->device->pipeline_conv_transpose_2d_f16_f32;
         }
         return nullptr;
     default:
