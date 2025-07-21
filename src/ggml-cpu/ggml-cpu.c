@@ -2733,15 +2733,6 @@ struct ggml_cplan ggml_graph_plan(
                     {
                         cur = ggml_type_size(GGML_TYPE_F32) * node->ne[0] * n_tasks;
                     } break;
-                case GGML_OP_CONV_2D:
-                case GGML_OP_CONV_2D_DEFORM:
-                    {
-                        const struct ggml_tensor * k = node->src[0];
-                        const int64_t n_patches = node->ne[0] * node->ne[1] * node->ne[3];
-                        const int64_t n_values = k->ne[0] * k->ne[1] * node->src[1]->ne[2];
-                        const int64_t im2col_size = n_patches * n_values * sizeof(float);
-                        cur = MIN(im2col_size, GGML_IM2COL_WORK_SIZE);
-                    } break;
                 case GGML_OP_CONV_TRANSPOSE_1D:
                     {
                         GGML_ASSERT(node->src[0]->ne[3] == 1);
@@ -2768,6 +2759,7 @@ struct ggml_cplan ggml_graph_plan(
                         }
                     } break;
                 case GGML_OP_CONV_2D:
+                case GGML_OP_CONV_2D_DEFORM:
                     {
                         cur = GGML_IM2COL_WORK_SIZE;
                     } break;
