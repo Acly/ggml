@@ -3489,7 +3489,7 @@ struct ggml_tensor * ggml_view_4d(
 
 // ggml_permute
 
-void ggml_set_permuted_strides(struct ggml_tensor * a, int axis0, int axis1, int axis2, int axis3) {
+static void ggml_set_permuted_strides(struct ggml_tensor * a, int axis0, int axis1, int axis2, int axis3) {
     a->nb[axis0] = ggml_type_size(a->type);
     a->nb[axis1] = a->nb[axis0] * (a->ne[axis0] / ggml_blck_size(a->type));
     a->nb[axis2] = a->nb[axis1] * a->ne[axis1];

@@ -6883,7 +6883,7 @@ static void ggml_compute_forward_conv_2d_cwhn(
     const ggml_tensor * kernel = dst->src[0];
     GGML_ASSERT(ggml_is_contiguous_channels(src));    // [C_in W H N] in memory
     GGML_ASSERT(ggml_is_contiguous_channels(kernel)   // [C_in W H C_out] in memory
-            || kernel->ne[0] == 1 && kernel->ne[1] == 1);
+            || (kernel->ne[0] == 1 && kernel->ne[1] == 1));
 
     const int32_t stride_x = dst->op_params[0];
     const int32_t stride_y = dst->op_params[1];
@@ -7072,7 +7072,7 @@ void ggml_compute_forward_conv_transpose_2d(
 
 // ggml_compute_forward_conv_2d_deform
 
-void ggml_vec_bilinear_interpolate_f32(
+static void ggml_vec_bilinear_interpolate_f32(
         int64_t n, float * dst, const float * src,
         int64_t w, int64_t h,
         float x, float y, float scale = 1.0f) {
