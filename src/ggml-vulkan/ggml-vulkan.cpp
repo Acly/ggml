@@ -85,14 +85,12 @@ static bool is_pow2(uint32_t x) { return x > 1 && (x & (x-1)) == 0; }
 
 #define MAX_VK_BUFFERS 256
 
-#define VK_CHECK(err, msg)                                          \
-    do {                                                            \
-        vk::Result err_ = (err);                                    \
-        if (err_ != vk::Result::eSuccess) {                         \
-            fprintf(stderr, "ggml_vulkan: %s error %s at %s:%d\n",  \
-                #err, to_string(err_).c_str(), __FILE__, __LINE__); \
-            exit(1);                                                \
-        }                                                           \
+#define VK_CHECK(err, msg)                                                                         \
+    do {                                                                                           \
+        vk::Result err_ = (err);                                                                   \
+        if (err_ != vk::Result::eSuccess) {                                                        \
+            ggml_abort(__FILE__, __LINE__, "%s: %s", #err, to_string(err_).c_str());               \
+        }                                                                                          \
     } while (0)
 
 #ifdef GGML_VULKAN_DEBUG
