@@ -1732,7 +1732,15 @@ static uint32_t find_properties(const vk::PhysicalDeviceMemoryProperties* mem_pr
 static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, vk::MemoryPropertyFlags req_flags, vk::MemoryPropertyFlags fallback_flags = vk::MemoryPropertyFlags(0)) {
     VK_LOG_DEBUG("ggml_vk_create_buffer(" << device->name << ", " << size << ", " << to_string(req_flags) << ", " << to_string(fallback_flags) << ")");
     if (size > device->max_memory_allocation_size) {
-        throw vk::OutOfDeviceMemoryError("Requested buffer size exceeds device memory allocation limit");
+        if (device->vendor_id == VK_VENDOR_ID_AMD) {
+            if (size >= 4 * 1024 * 1024 * 1024) {
+                throw vk::OutOfDeviceMemoryError("Requested buffer size exceeds AMD device memory allocation limit of 4 GiB");
+            }
+            // AMD driver sometimes incorrectly reports a 2GB limit even though up to 4GB is possible.
+            VK_LOG_DEBUG("ggml_vk_create_buffer: Trying to ignore max_memory_allocation_size");
+        } else {
+            throw vk::OutOfDeviceMemoryError("Requested buffer size exceeds device memory allocation limit");
+        }
     }
 
     vk_buffer buf = std::make_shared<vk_buffer_struct>();
