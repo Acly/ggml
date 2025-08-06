@@ -4431,6 +4431,12 @@ struct ggml_tensor * ggml_conv_2d_direct(
 
     struct ggml_tensor * result = ggml_new_tensor(ctx, b->type, 4, ne);
 
+    if (!(ggml_is_contiguous(a) && ggml_is_contiguous(b))) {
+        GGML_ASSERT(ggml_is_contiguous_channels(a) && ggml_is_contiguous_channels(b));
+        // inputs and output are CWHN in memory, with strides permuted to WHCN
+        ggml_set_permuted_strides(result, 2, 0, 1, 3);
+    }
+
     ggml_set_op_params_i32(result, 0, s0);
     ggml_set_op_params_i32(result, 1, s1);
     ggml_set_op_params_i32(result, 2, p0);
