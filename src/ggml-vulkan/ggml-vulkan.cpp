@@ -501,7 +501,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_count_equal_i32;
     vk_pipeline pipeline_im2col_f32, pipeline_im2col_f32_f16;
     vk_pipeline pipeline_im2col_cwhn_f32;
-    vk_pipeline pipeline_im2col_deform_f32;
+    vk_pipeline pipeline_im2col_deform_f32_whcn, pipeline_im2col_deform_f32_cwhn;
     vk_pipeline pipeline_timestep_embedding_f32;
     vk_pipeline pipeline_conv_transpose_1d_f32;
     vk_pipeline pipeline_pool2d_f32;
@@ -3126,7 +3126,8 @@ static void ggml_vk_load_shaders(vk_device& device) {
         ggml_vk_create_pipeline(device, device->pipeline_im2col_f32_f16, "im2col_f32_f16", im2col_f32_f16_len, im2col_f32_f16_data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);
     }
     ggml_vk_create_pipeline(device, device->pipeline_im2col_cwhn_f32, "im2col_cwhn_f32", im2col_cwhn_f32_len, im2col_cwhn_f32_data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);
-    ggml_vk_create_pipeline(device, device->pipeline_im2col_deform_f32, "im2col_deform_f32", im2col_deform_f32_len, im2col_deform_f32_data, "main", 4, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_im2col_deform_f32_whcn, "im2col_deform_f32", im2col_deform_f32_len, im2col_deform_f32_data, "main", 4, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size, 0 }, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_im2col_deform_f32_cwhn, "im2col_deform_f32", im2col_deform_f32_len, im2col_deform_f32_data, "main", 4, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size, 1 }, 1, true);
 
     ggml_vk_create_pipeline(device, device->pipeline_timestep_embedding_f32, "timestep_embedding_f32", timestep_embedding_f32_len, timestep_embedding_f32_data, "main", 2, sizeof(vk_op_timestep_embedding_push_constants), {256, 1, 1}, {}, 1);
 
@@ -8554,6 +8555,8 @@ static void ggml_vk_set_shape(ggml_tensor& t, uint64_t ne0, uint64_t ne1 = 1, ui
 }
 
 static void ggml_vk_conv_2d_deform(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst, bool dryrun = false) {
+    bool is_whcn = ggml_is_contiguous(src0) && ggml_is_contiguous(src1);
+
     vk_device& device = ctx->device;
     vk_op_im2col_push_constants p{};
     p.batch_offset = src1->nb[3] / ggml_type_size(src1->type);
@@ -8575,15 +8578,27 @@ static void ggml_vk_conv_2d_deform(ggml_backend_vk_context * ctx, vk_context& su
     p.d1 = 1;
     const uint32_t OC = src0->ne[3];
     const uint32_t B = dst->ne[3];
-    const auto elements = std::array{
-        p.IC * p.OW * p.KW * p.KH,
-        p.OH * B,
-        1u};
+
+    std::array<uint32_t, 3> elements;
+    vk_pipeline* pipeline;
+    if (is_whcn) {
+        pipeline = &device->pipeline_im2col_deform_f32_whcn;
+        elements = std::array{
+            p.OW * p.KW * p.KH,
+            p.OH,
+            p.IC * B};
+    } else {
+        pipeline = &device->pipeline_im2col_deform_f32_cwhn;
+        elements = std::array{
+            p.IC * p.OW * p.KW * p.KH,
+            p.OH * B,
+            1u};
+    }
 
     if (dryrun) {
-        size_t im2col_size = elements[0] * elements[1] * ggml_type_size(src1->type);
+        size_t im2col_size = elements[0] * elements[1] * elements[2] * ggml_type_size(src1->type);
         ctx->prealloc_size_im2col = std::max(ctx->prealloc_size_im2col, im2col_size);
-        ggml_pipeline_request_descriptor_sets(ctx, device->pipeline_im2col_deform_f32, 1);
+        ggml_pipeline_request_descriptor_sets(ctx, *pipeline, 1);
     }
 
     // im2col
@@ -8594,7 +8609,7 @@ static void ggml_vk_conv_2d_deform(ggml_backend_vk_context * ctx, vk_context& su
     vk_subbuffer tmp_buf = ggml_vk_subbuffer(ctx->prealloc_im2col);
 
     if (!dryrun) {
-        ggml_vk_dispatch_pipeline(ctx, subctx, ctx->device->pipeline_im2col_deform_f32,
+        ggml_vk_dispatch_pipeline(ctx, subctx, *pipeline,
             {x_buf, offset_buf, mask_buf, tmp_buf}, p, elements);
         ggml_vk_sync_buffers(subctx);
     }

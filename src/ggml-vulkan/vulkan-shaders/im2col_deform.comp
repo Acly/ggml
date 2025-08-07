@@ -19,6 +19,7 @@ layout (push_constant) uniform parameter
 #include "types.comp"
 
 layout(constant_id = 0) const uint BLOCK_SIZE = 32;
+layout(constant_id = 1) const uint MEMORY_LAYOUT = 0; // 0: whcn, 1: cwhn
 
 const uint NUM_ITER = 512 / BLOCK_SIZE;
 
@@ -49,7 +50,7 @@ A_TYPE bilinear_interpolate(uint base, float x, float y) {
          + (v10 * (1 - dx) + v11 * dx) * dy;
 }
 
-void main() {
+void im2col_deform_cwhn() {
     const uint gidx = gl_GlobalInvocationID.x;
     const uint batch = gl_GlobalInvocationID.y / p.OH;
     const uint oh = gl_GlobalInvocationID.y % p.OH;
@@ -105,5 +106,101 @@ void main() {
             continue;
         }
         data_dst[dst_base + linear_idx] = D_TYPE(values[idx]);
+    }
+}
+
+A_TYPE bilinear_interpolate_whcn(uint base, float x, float y) {
+    const float x0f = floor(x);
+    const float y0f = floor(y);
+    const uint x0 = uint(int(x0f));
+    const uint y0 = uint(int(y0f));
+    const uint x1 = x0 + 1;
+    const uint y1 = y0 + 1;
+
+    const float dx = x - x0f;
+    const float dy = y - y0f;
+
+    A_TYPE v00 = x0 < p.IW && y0 < p.IH ? data_src[base + (y0 * p.IW + x0)] : A_TYPE(0);
+    A_TYPE v01 = x1 < p.IW && y0 < p.IH ? data_src[base + (y0 * p.IW + x1)] : A_TYPE(0);
+    A_TYPE v10 = x0 < p.IW && y1 < p.IH ? data_src[base + (y1 * p.IW + x0)] : A_TYPE(0);
+    A_TYPE v11 = x1 < p.IW && y1 < p.IH ? data_src[base + (y1 * p.IW + x1)] : A_TYPE(0);
+
+    return (v00 * (1 - dx) + v01 * dx) * (1 - dy)
+         + (v10 * (1 - dx) + v11 * dx) * dy;
+}
+
+
+void im2col_deform_whcn() {
+    const uint gidx = gl_GlobalInvocationID.x;
+
+    const uint oh = gl_GlobalInvocationID.y;
+    const uint batch = gl_GlobalInvocationID.z / p.IC;
+    const uint ic = gl_GlobalInvocationID.z % p.IC;
+
+    const uint src_base = ic * p.offset_delta + batch * p.batch_offset;
+    const uint dst_base = ((batch * p.OH + oh) * p.OW) * p.CHW + ic * (p.KW * p.KH);
+    const int oh_s1 = int(oh) * p.s1;
+    const uint ksize = p.OW * (p.KH > 1 ? p.KW : 1);
+
+    const uint base_linear_idx = gidx * NUM_ITER;
+    const uint max_ky = ksize / p.OW;
+
+    uint current_kx = base_linear_idx / ksize;
+    const uint rem = base_linear_idx - (current_kx * ksize);
+    uint current_ky = rem / p.OW;
+    uint current_ix = rem % p.OW;
+
+    A_TYPE values[NUM_ITER];
+    uint offset_dst[NUM_ITER];
+    [[unroll]] for (uint idx = 0; idx < NUM_ITER; ++idx) {
+        values[idx] = A_TYPE(0);
+    }
+
+    [[unroll]] for (uint idx = 0; idx < NUM_ITER; ++idx) {
+        const uint linear_idx = base_linear_idx + idx;
+        if (linear_idx >= p.pelements) {
+            continue;
+        }
+
+        // mask layout: [OW, OH, KW*KH, N]
+        const uint mask_idx = current_ky * p.KW + current_kx;
+
+        // offset layout: [OW, OH, KW*KH*2, N]
+        const uint offset_idx = 2 * mask_idx;
+        const float offset_x = float(data_offset[(offset_idx + 1) * (p.OH * p.OW) + oh * p.OW + current_ix]);
+        const float offset_y = float(data_offset[(offset_idx + 0) * (p.OH * p.OW) + oh * p.OW + current_ix]);
+
+        offset_dst[idx] = dst_base + current_ix * p.CHW + current_ky * p.KW + current_kx;
+
+        const float iiw = float(current_ix * p.s0 + current_kx) - p.p0 + offset_x;
+        const float iih = float(oh_s1             + current_ky) - p.p1 + offset_y;
+
+        float mask_val = data_mask[mask_idx * (p.OH * p.OW) + oh * p.OW + current_ix];
+       
+        values[idx] = bilinear_interpolate_whcn(src_base, iiw, iih) * mask_val;
+
+        if (++current_ix == p.OW) {
+            current_ix = 0;
+            if (++current_ky == max_ky) {
+                current_ky = 0;
+                current_kx++;
+            }
+        }
+    }
+
+    [[unroll]] for (uint idx = 0; idx < NUM_ITER; ++idx) {
+        const uint linear_idx = base_linear_idx + idx;
+        if (linear_idx >= p.pelements) {
+            continue;
+        }
+        data_dst[offset_dst[idx]] = D_TYPE(values[idx]);
+    }
+}
+
+void main() {
+    if (MEMORY_LAYOUT == 0) {
+        im2col_deform_whcn();
+    } else {
+        im2col_deform_cwhn();
     }
 }
