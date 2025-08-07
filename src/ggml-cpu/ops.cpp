@@ -6809,8 +6809,8 @@ static void ggml_compute_forward_conv_2d_impl(const ggml_compute_params * params
         //im2col for a patch
         for (int64_t p = patch_start; p < patch_end; ++p) {
             const int64_t  batch_n     =  p / (dst_w * dst_h);
-            const int64_t  src_x       = (p / dst_w) % dst_h;
-            const int64_t  src_y       =  p % dst_w;
+            const int64_t  src_y       = (p / dst_w) % dst_h;
+            const int64_t  src_x       =  p % dst_w;
 
             const float * src_base = (const float *)((const char *)src_data + batch_n * src->nb[3]);
             char *        dst_row  = (char *) tmp + (p % patches_per_batch) * knl_n * traits->type_size;
@@ -6818,8 +6818,8 @@ static void ggml_compute_forward_conv_2d_impl(const ggml_compute_params * params
             for (int64_t ic = 0; ic < c_in; ++ic) {
                 for (int64_t ky = 0; ky < knl_h; ++ky) {
                     for (int64_t kx = 0; kx < knl_w; ++kx) {
-                        const int64_t sy = src_x * stride_y + ky * dilation_y - pad_y;
-                        const int64_t sx = src_y * stride_x + kx * dilation_x - pad_x;
+                        const int64_t sy = src_y * stride_y + ky * dilation_y - pad_y;
+                        const int64_t sx = src_x * stride_x + kx * dilation_x - pad_x;
 
                         int64_t dst_idx = ic * (knl_h * knl_w) + ky * knl_w + kx;
 
@@ -7072,6 +7072,29 @@ void ggml_compute_forward_conv_transpose_2d(
 
 // ggml_compute_forward_conv_2d_deform
 
+static float ggml_bilinear_interpolate_f32(
+    const float * src, int64_t w, int64_t h,
+    float x, float y) {
+
+    int64_t x0 = (int64_t)floorf(x);
+    int64_t y0 = (int64_t)floorf(y);
+    int64_t x1 = x0 + 1;
+    int64_t y1 = y0 + 1;
+
+    float dx = x - x0;
+    float dy = y - y0;
+
+    float v00 = x0 >= 0 && y0 >= 0 ? src[y0 * w + x0] : 0.0f;
+    float v01 = x1 <  w && y0 >= 0 ? src[y0 * w + x1] : 0.0f;
+    float v10 = x0 >= 0 && y1 <  h ? src[y1 * w + x0] : 0.0f;
+    float v11 = x1 <  w && y1 <  h ? src[y1 * w + x1] : 0.0f;
+
+    float val = (v00 * (1.0f - dx) + v01 * dx) * (1.0f - dy)
+              + (v10 * (1.0f - dx) + v11 * dx) * dy;
+    return val;
+}
+
+
 static void ggml_vec_bilinear_interpolate_f32(
         int64_t n, float * dst, const float * src,
         int64_t w, int64_t h,
@@ -7128,11 +7151,14 @@ static void ggml_vec_bilinear_interpolate_f32(
     }
 }
 
-void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tensor * dst) {
-    const ggml_tensor * src = dst->src[1];
-    const ggml_tensor * kernel = dst->src[0];
-    const ggml_tensor * offset = dst->src[2];
-    const ggml_tensor * mask = dst->src[3];
+static void ggml_compute_forward_conv_2d_deform_cwhn(
+    ggml_compute_params * params,
+    const ggml_tensor * src,
+    const ggml_tensor * kernel,
+    const ggml_tensor * offset,
+    const ggml_tensor * mask,
+          ggml_tensor * dst) {
+
     GGML_ASSERT(ggml_is_contiguous_channels(src));    // [C_in W  H  N] in memory
     GGML_ASSERT(ggml_is_contiguous_channels(kernel)   // [C_in KW KH C_out] in memory
             || (kernel->ne[0] == 1 && kernel->ne[1] == 1));
@@ -7157,7 +7183,7 @@ void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tens
 
     GGML_ASSERT(kernel->ne[2] == c_in);
     GGML_ASSERT(offset->ne[2] == 2 * knl_w * knl_h);    // [2*kw*kh dst_w dst_h batch] in memory
-    GGML_ASSERT(!mask || mask->ne[2] == knl_w * knl_h);   // [kw*kh dst_w dst_h batch] in memory
+    GGML_ASSERT(!mask || mask->ne[2] == knl_w * knl_h); // [kw*kh dst_w dst_h batch] in memory
 
     const int64_t knl_n = c_in * knl_w * knl_h;
     const int64_t patch_total = dst->ne[3] * dst_w * dst_h;
@@ -7212,6 +7238,147 @@ void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tens
         float * dst_data_offset = dst_data + batch_start * c_out;
         ggml_call_mul_mat(GGML_TYPE_F32, params, patch_n, c_out, knl_n, tmp, knl_data, dst_data_offset);
     } // for each batch
+}
+
+static void ggml_compute_forward_conv_2d_deform_whcn(
+    const ggml_compute_params * params,
+    const ggml_tensor *         src,
+    const ggml_tensor *         kernel,
+    const ggml_tensor *         offset, // [dst_w, dst_h, 2*kw*kh, batch] in memory
+    const ggml_tensor *         mask,   // [dst_w, dst_h,   kw*kh, batch] in memory
+    ggml_tensor *               dst) {
+
+
+    GGML_ASSERT(ggml_is_contiguous(kernel));
+
+    const int32_t stride_x   = dst->op_params[0];
+    const int32_t stride_y   = dst->op_params[1];
+    const int32_t pad_x      = dst->op_params[2];
+    const int32_t pad_y      = dst->op_params[3];
+
+    const int64_t c_in  = src->ne[2];
+    const int64_t c_out = kernel->ne[3];
+    GGML_ASSERT(c_in == kernel->ne[2]);
+
+    const int64_t src_w = src->ne[0];
+    const int64_t src_h = src->ne[1];
+    const int64_t knl_w = kernel->ne[0];
+    const int64_t knl_h = kernel->ne[1];
+    const int64_t knl_wh = knl_w * knl_h;
+    const int64_t dst_w = dst->ne[0];
+    const int64_t dst_h = dst->ne[1];
+
+    const float * src_data = (float *) src->data;
+    void  * knl_data       = kernel->data;
+    float * dst_data       = (float *) dst->data;
+
+    const int64_t knl_n           = knl_w * knl_h * c_in;
+    const int64_t patch_total     = dst->ne[3] * dst_w * dst_h;
+
+    const int64_t space_per_patch   = knl_n * sizeof(float) + c_out * sizeof(float);
+    const int64_t batch_size        = params->wsize / space_per_patch;
+    const int64_t patches_per_batch = batch_size > 8 ? (batch_size / 8) * 8 : batch_size;
+    const int64_t batch_n           = (patch_total + patches_per_batch - 1) / patches_per_batch;
+
+    GGML_ASSERT(patches_per_batch > 0 && batch_size >= 1);
+
+    void * tmp = params->wdata;
+
+    for (int64_t batch_i = 0; batch_i < batch_n; ++batch_i) {
+
+        const int64_t patch_start_batch = batch_i * patches_per_batch;
+        const int64_t patch_end_batch   = std::min(patch_start_batch + patches_per_batch,
+                                              patch_total);
+        const int64_t patch_n           = patch_end_batch - patch_start_batch;
+
+        const int64_t patch_per_thread  = (patch_n + params->nth - 1) / params->nth;
+        const int64_t patch_start       = patch_start_batch + params->ith * patch_per_thread;
+        const int64_t patch_end         = std::min(patch_start + patch_per_thread, patch_end_batch);
+
+        //im2col for a patch
+        for (int64_t p = patch_start; p < patch_end; ++p) {
+            const int64_t  batch_n     =  p / (dst_w * dst_h);
+            const int64_t  src_y       = (p / dst_w) % dst_h;
+            const int64_t  src_x       =  p % dst_w;
+
+            const int64_t dst_coord = src_y * dst_w + src_x;
+
+            const float * src_base = (const float *)((const char *)src_data + batch_n * src->nb[3]);
+            char *        dst_row  = (char *) tmp + (p % patches_per_batch) * knl_n * sizeof(float);
+
+            const float * off_patch = (const float*)offset->data + dst_coord;
+            const float * msk_patch = mask ? (const float*)mask->data + dst_coord : nullptr;
+
+            for (int64_t ic = 0; ic < c_in; ++ic) {
+                for (int64_t ky = 0; ky < knl_h; ++ky) {
+                    for (int64_t kx = 0; kx < knl_w; ++kx) {
+                        int knl_i = ky * knl_w + kx;
+
+                        float off_x = off_patch[(2 * knl_i + 1) * (dst_w * dst_h)];
+                        float off_y = off_patch[(2 * knl_i + 0) * (dst_w * dst_h)];
+
+                        const float sy = float(src_y * stride_y + ky) - pad_y + off_y;
+                        const float sx = float(src_x * stride_x + kx) - pad_x + off_x;
+
+                        float src_val;
+                        if (sx <= -1 || sx >= src_w || sy <= -1 || sy >= src_h) {
+                            src_val = 0.0f;
+                        } else {
+                            const float * src_ptr = (const float *)((const char *)src_base + ic * src->nb[2]);
+                            float weight = mask ? msk_patch[knl_i * dst_w * dst_h] : 1.0f;
+                            src_val = weight * ggml_bilinear_interpolate_f32(src_ptr, src_w, src_h, sx, sy);
+                        }
+
+                        int64_t dst_idx = ic * (knl_h * knl_w) + ky * knl_w + kx;
+                        char * element_ptr = dst_row + dst_idx * sizeof(float);
+                        *(float *) element_ptr = src_val;
+                    }
+                }
+            }
+        }   // patches handled by this thread
+
+        ggml_barrier(params->threadpool);
+
+        float * gemm_output = (float *) ((char *) tmp + patches_per_batch * knl_n * sizeof(float));
+
+        GGML_ASSERT(gemm_output + patch_n * c_out <= (float*)tmp + params->wsize);
+
+        // GEMM: patches[patch_n, knl_n] × kernel[knl_n, c_out] = output[patch_n, c_out]
+        ggml_call_mul_mat(GGML_TYPE_F32, params, patch_n, c_out, knl_n, tmp, knl_data, gemm_output);
+
+        ggml_barrier(params->threadpool);
+
+        //permute back [OC, N, OH, OW] to [N, OC, OH, OW]
+        const int64_t permute_per_thread = (patch_n + params->nth - 1) / params->nth;
+        const int64_t permute_start = params->ith * permute_per_thread;
+        const int64_t permute_end = std::min(permute_start + permute_per_thread, patch_n);
+
+        for (int64_t i = permute_start; i < permute_end; ++i) {
+            const int64_t p       = patch_start_batch + i;
+            const int64_t batch_n = p / (dst_w * dst_h);
+            const int64_t dst_y   = (p / dst_w) % dst_h;
+            const int64_t dst_x   = p % dst_w;
+
+            for (int64_t oc = 0; oc < c_out; ++oc) {
+                const float value = gemm_output[i * c_out + oc];
+                float * dst_ptr = (float *)((char *)dst_data + dst_x * dst->nb[0] + dst_y * dst->nb[1] + oc * dst->nb[2] + batch_n * dst->nb[3]);
+                *dst_ptr = value;
+            }
+        }
+    }
+}
+
+void ggml_compute_forward_conv_2d_deform(ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * src = dst->src[1];
+    const ggml_tensor * kernel = dst->src[0];
+    const ggml_tensor * offset = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+
+    if (!(ggml_is_contiguous(src) && ggml_is_contiguous(kernel))) {
+        ggml_compute_forward_conv_2d_deform_cwhn(params, src, kernel, offset, mask, dst);
+    } else {
+        ggml_compute_forward_conv_2d_deform_whcn(params, src, kernel, offset, mask, dst);
+    }
 }
     
 // ggml_compute_forward_conv_2d_dw
