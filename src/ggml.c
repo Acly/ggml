@@ -1370,8 +1370,8 @@ bool ggml_is_permuted(const struct ggml_tensor * tensor) {
 
 bool ggml_is_contiguous_channels(const struct ggml_tensor * tensor) {
     return
-        tensor->nb[0] > tensor->nb[2] &&
-        tensor->nb[1] > tensor->nb[0] &&
+        tensor->nb[0] >= tensor->nb[2] &&
+        tensor->nb[1] >= tensor->nb[0] &&
         tensor->nb[2] == ggml_type_size(tensor->type);
 }
 
@@ -4478,7 +4478,8 @@ struct ggml_tensor * ggml_conv_2d_deform(
 
     struct ggml_tensor * result = ggml_new_tensor(ctx, input->type, 4, ne);
 
-    if (ggml_is_contiguous_channels(input)) {
+    if (!(ggml_is_contiguous(input) && ggml_is_contiguous(kernel))) {
+        GGML_ASSERT(ggml_is_contiguous_channels(input) && ggml_is_contiguous_channels(kernel));
         // Memory layout of input:  [IC W  H  N ], permuted to [W  H  IC N ]
         // Memory layout of result: [OC OW OH N ], permuted to [OW OH OC N ]
         // Memory layout of kernel: [IC KW KH OC], permuted to [KW KH IC OC]
