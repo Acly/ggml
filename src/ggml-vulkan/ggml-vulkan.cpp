@@ -510,6 +510,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_opt_step_adamw_f32;
     vk_pipeline pipeline_conv2d_f32[CONV_SHAPE_COUNT];
     vk_pipeline pipeline_conv2d_f16_f32[CONV_SHAPE_COUNT];
+    vk_pipeline pipeline_conv2d_deform_f32[CONV_SHAPE_COUNT];
+    vk_pipeline pipeline_conv2d_deform_f16_f32[CONV_SHAPE_COUNT];
     vk_pipeline pipeline_conv2d_dw_whcn_f32;
     vk_pipeline pipeline_conv2d_dw_cwhn_f32;
     vk_pipeline pipeline_conv2d_dw_whcn_f16_f32;
@@ -1733,7 +1735,7 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, vk::Memor
     VK_LOG_DEBUG("ggml_vk_create_buffer(" << device->name << ", " << size << ", " << to_string(req_flags) << ", " << to_string(fallback_flags) << ")");
     if (size > device->max_memory_allocation_size) {
         if (device->vendor_id == VK_VENDOR_ID_AMD) {
-            if (size >= 4 * 1024 * 1024 * 1024) {
+            if (size >= size_t(4) * 1024 * 1024 * 1024) {
                 throw vk::OutOfDeviceMemoryError("Requested buffer size exceeds AMD device memory allocation limit of 4 GiB");
             }
             // AMD driver sometimes incorrectly reports a 2GB limit even though up to 4GB is possible.
@@ -3234,6 +3236,21 @@ static void ggml_vk_load_shaders(vk_device& device) {
                 sizeof(vk_op_conv2d_push_constants), wg_denoms, spec_constants, 1, true, use_collectives);
             ggml_vk_create_pipeline(
                 device, device->pipeline_conv2d_f16_f32[s], "conv2d_f16_f32", conv2d_f16_f32_len, conv2d_f16_f32_data, "main", 3,
+                sizeof(vk_op_conv2d_push_constants), wg_denoms, spec_constants, 1, true, use_collectives);
+        }
+        if (device->coopmat2) {
+            ggml_vk_create_pipeline(
+                device, device->pipeline_conv2d_deform_f32[s], "conv2d_deform_f32", conv2d_deform_f32_cm2_len, conv2d_deform_f32_cm2_data, "main", 5,
+                sizeof(vk_op_conv2d_push_constants), wg_denoms, spec_constants, 1, true, use_collectives);
+            ggml_vk_create_pipeline(
+                device, device->pipeline_conv2d_deform_f16_f32[s], "conv2d_deform_f16_f32", conv2d_deform_f16_f32_cm2_len, conv2d_deform_f16_f32_cm2_data, "main", 5,
+                sizeof(vk_op_conv2d_push_constants), wg_denoms, spec_constants, 1, true, use_collectives);
+        } else {
+            ggml_vk_create_pipeline(
+                device, device->pipeline_conv2d_deform_f32[s], "conv2d_deform_f32", conv2d_deform_f32_len, conv2d_deform_f32_data, "main", 5,
+                sizeof(vk_op_conv2d_push_constants), wg_denoms, spec_constants, 1, true, use_collectives);
+            ggml_vk_create_pipeline(
+                device, device->pipeline_conv2d_deform_f16_f32[s], "conv2d_deform_f16_f32", conv2d_deform_f16_f32_len, conv2d_deform_f16_f32_data, "main", 5,
                 sizeof(vk_op_conv2d_push_constants), wg_denoms, spec_constants, 1, true, use_collectives);
         }
     }
@@ -7185,14 +7202,18 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
         }
         return nullptr;
     case GGML_OP_CONV_2D:
+    case GGML_OP_CONV_2D_DEFORM:
         if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
             ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
             auto elements = ggml_vk_get_conv_elements(dst);
             vk_conv_shapes shape;
 
+            vk_pipeline const* pipelines = (op == GGML_OP_CONV_2D)
+                ? ctx->device->pipeline_conv2d_f32
+                : ctx->device->pipeline_conv2d_deform_f32;
             uint32_t tiles[CONV_SHAPE_COUNT];
             for (uint32_t i = 0; i < CONV_SHAPE_COUNT; ++i) {
-                tiles[i] = CEIL_DIV(elements[0], ctx->device->pipeline_conv2d_f32[i]->wg_denoms[0]) * CEIL_DIV(elements[1], ctx->device->pipeline_conv2d_f32[i]->wg_denoms[1]);
+                tiles[i] = CEIL_DIV(elements[0], pipelines[i]->wg_denoms[0]) * CEIL_DIV(elements[1], pipelines[i]->wg_denoms[1]);
             }
 
             // We can't query number of shader cores on Intel, use 32 as a placeholder
@@ -7207,11 +7228,12 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
                 shape = CONV_SHAPE_64x32;
             }
 
-            if (src0->type == GGML_TYPE_F32) {
-                return ctx->device->pipeline_conv2d_f32[shape];
-            } else if (src0->type == GGML_TYPE_F16) {
-                return ctx->device->pipeline_conv2d_f16_f32[shape];
+            if (src0->type == GGML_TYPE_F16) {
+                pipelines = (op == GGML_OP_CONV_2D)
+                    ? ctx->device->pipeline_conv2d_f16_f32
+                    : ctx->device->pipeline_conv2d_deform_f16_f32;
             }
+            return pipelines[shape];
         }
         return nullptr;
     case GGML_OP_CONV_2D_DW:
@@ -7325,6 +7347,7 @@ template <> void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk
 
 template<typename PC>
 static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, ggml_tensor * dst, ggml_op op, PC&& pc, bool dryrun = false) {
+    ggml_tensor * src3 = dst->src[3];
     VK_LOG_DEBUG("ggml_vk_op_f32((" << src0 << ", name=" << src0->name << ", type=" << src0->type << ", ne0=" << src0->ne[0] << ", ne1=" << src0->ne[1] << ", ne2=" << src0->ne[2] << ", ne3=" << src0->ne[3] << ", nb0=" << src0->nb[0] << ", nb1=" << src0->nb[1] << ", nb2=" << src0->nb[2] << ", nb3=" << src0->nb[3];
     if (src1 != nullptr) {
         std::cerr << "), (" << src1 << ", name=" << src1->name << ", type=" << src1->type << ", ne0=" << src1->ne[0] << ", ne1=" << src1->ne[1] << ", ne2=" << src1->ne[2] << ", ne3=" << src1->ne[3] << ", nb0=" << src1->nb[0] << ", nb1=" << src1->nb[1] << ", nb2=" << src1->nb[2] << ", nb3=" << src1->nb[3];
@@ -7358,6 +7381,13 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     const uint64_t ne23 = use_src2 ? src2->ne[3] : 0;
     const uint64_t ne2 = ne20 * ne21;
 
+    const bool use_src3 = src3 != nullptr;
+    const uint64_t ne30 = use_src3 ? src3->ne[0] : 0;
+    const uint64_t ne31 = use_src3 ? src3->ne[1] : 0;
+    const uint64_t ne32 = use_src3 ? src3->ne[2] : 0;
+    const uint64_t ne33 = use_src3 ? src3->ne[3] : 0;
+    const uint64_t ne3 = ne30 * ne31;
+
     const uint64_t ned0 = dst->ne[0];
     const uint64_t ned1 = dst->ne[1];
     const uint64_t ned2 = dst->ne[2];
@@ -7388,6 +7418,7 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     ggml_backend_vk_buffer_context * src0_buf_ctx = (ggml_backend_vk_buffer_context *)src0->buffer->context;
     ggml_backend_vk_buffer_context * src1_buf_ctx = use_src1 ? (ggml_backend_vk_buffer_context *)src1->buffer->context : nullptr;
     ggml_backend_vk_buffer_context * src2_buf_ctx = use_src2 ? (ggml_backend_vk_buffer_context *)src2->buffer->context : nullptr;
+    ggml_backend_vk_buffer_context * src3_buf_ctx = use_src3 ? (ggml_backend_vk_buffer_context *)src3->buffer->context : nullptr;
 
     vk_buffer d_X = nullptr;
     size_t x_buf_offset = 0;
@@ -7395,10 +7426,13 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     size_t y_buf_offset = 0;
     vk_buffer d_Z = nullptr;
     size_t z_buf_offset = 0;
+    vk_buffer d_W = nullptr;
+    size_t w_buf_offset = 0;
 
     bool src0_uma = false;
     bool src1_uma = false;
     bool src2_uma = false;
+    bool src3_uma = false;
 
     if (ctx->device->uma) {
         ggml_vk_host_get(ctx->device, src0->data, d_X, x_buf_offset);
@@ -7411,11 +7445,16 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
             ggml_vk_host_get(ctx->device, src2->data, d_Z, z_buf_offset);
             src2_uma = d_Z != nullptr;
         }
+        if (use_src3) {
+            ggml_vk_host_get(ctx->device, src3->data, d_W, w_buf_offset);
+            src3_uma = d_W != nullptr;
+        }
     }
 
     uint64_t x_sz = ggml_type_size(src0->type)/ggml_blck_size(src0->type) * ne0;
     uint64_t y_sz = use_src1 ? ggml_type_size(src1->type) * ne1 : 0;
     uint64_t z_sz = use_src2 ? ggml_type_size(src2->type) * ne2 : 0;
+    uint64_t w_sz = use_src3 ? ggml_type_size(src3->type) * ne3 : 0;
     uint64_t d_sz = ggml_type_size(dst->type) * ned;
 
     vk_buffer d_D = dst_buf_ctx->dev_buffer;
@@ -7442,17 +7481,24 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
         z_buf_offset = vk_tensor_offset(src2) + src2->view_offs;
         GGML_ASSERT(d_Z != nullptr);
     }
+    if (use_src3 && !src3_uma) {
+        d_W = src3_buf_ctx->dev_buffer;
+        w_buf_offset = vk_tensor_offset(src3) + src3->view_offs;
+        GGML_ASSERT(d_W != nullptr);
+    }
     // Compute misalignment offset for descriptors and store it in in push constants, then align the descriptor offsets.
     init_pushconst_tensor_offsets(ctx, pc, src0, src1, src2, dst);
     x_buf_offset &= ~(ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
     y_buf_offset &= ~(ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
     z_buf_offset &= ~(ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
+    w_buf_offset &= ~(ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
     d_buf_offset &= ~(ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
 
     if (op_supports_incontiguous) {
         x_sz = ggml_nbytes(src0);
         y_sz = use_src1 ? ggml_nbytes(src1) : 0;
         z_sz = use_src2 ? ggml_nbytes(src2) : 0;
+        w_sz = use_src3 ? ggml_nbytes(src3) : 0;
         d_sz = ggml_nbytes(dst);
 
         if (x_buf_offset + x_sz >= d_X->size) {
@@ -7463,6 +7509,9 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
         }
         if (use_src2 && z_buf_offset + z_sz >= d_Z->size) {
             z_sz = VK_WHOLE_SIZE;
+        }
+        if (use_src3 && w_buf_offset + w_sz >= d_W->size) {
+            w_sz = VK_WHOLE_SIZE;
         }
         if (d_buf_offset + d_sz >= d_D->size) {
             d_sz = VK_WHOLE_SIZE;
@@ -7556,6 +7605,7 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
             elements = { N * OC * OH * OW, 1, 1};
         } break;
     case GGML_OP_CONV_2D:
+    case GGML_OP_CONV_2D_DEFORM:
         {
             elements = ggml_vk_get_conv_elements(dst);
         } break;
@@ -7646,6 +7696,9 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
         if (use_src2 && z_sz != VK_WHOLE_SIZE) {
             z_sz *= ne22 * ne23;
         }
+        if (use_src3 && w_sz != VK_WHOLE_SIZE) {
+            w_sz *= ne32 * ne33;
+        }
         if (d_sz != VK_WHOLE_SIZE) {
             d_sz *= ned2 * ned3;
         }
@@ -7683,6 +7736,9 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
         ggml_vk_buffer_memset_async(subctx, d_D, d_buf_offset, 0, d_sz);
         ggml_vk_sync_buffers(subctx);
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { vk_subbuffer{ d_X, x_buf_offset, x_sz }, vk_subbuffer{ d_Y, y_buf_offset, y_sz }, vk_subbuffer{ d_D, d_buf_offset, d_sz } }, pc, elements);
+    } else if (use_src3) {
+        ggml_vk_sync_buffers(subctx);
+        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { vk_subbuffer{ d_X, x_buf_offset, x_sz }, vk_subbuffer{ d_Y, y_buf_offset, y_sz }, vk_subbuffer{ d_Z, z_buf_offset, z_sz }, vk_subbuffer{ d_W, w_buf_offset, w_sz }, vk_subbuffer{ d_D, d_buf_offset, d_sz } }, pc, elements);
     } else if (use_src2) {
         ggml_vk_sync_buffers(subctx);
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { vk_subbuffer{ d_X, x_buf_offset, x_sz }, vk_subbuffer{ d_Y, y_buf_offset, y_sz }, vk_subbuffer{ d_Z, z_buf_offset, z_sz }, vk_subbuffer{ d_D, d_buf_offset, d_sz } }, pc, elements);
@@ -8493,7 +8549,7 @@ static void ggml_vk_conv_2d(ggml_backend_vk_context * ctx, vk_context & subctx, 
     GGML_ASSERT(ne03 == ne2);
     GGML_ASSERT(ne02 == ne12);
 
-    ggml_vk_op_f32(ctx, subctx, src0, src1, nullptr, dst, GGML_OP_CONV_2D, std::move(p), dryrun);
+    ggml_vk_op_f32(ctx, subctx, src0, src1, dst->src[2], dst, dst->op, std::move(p), dryrun);
 }
 
 static void ggml_vk_conv_2d_dw(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, bool dryrun = false) {
@@ -8565,7 +8621,7 @@ static void ggml_vk_set_shape(ggml_tensor& t, uint64_t ne0, uint64_t ne1 = 1, ui
     t.nb[3] = t.ne[2] * t.nb[2];
 }
 
-static void ggml_vk_conv_2d_deform(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst, bool dryrun = false) {
+static void ggml_vk_conv_2d_deform_indirect(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst, bool dryrun = false) {
     bool is_whcn = ggml_is_contiguous(src0) && ggml_is_contiguous(src1);
 
     vk_device& device = ctx->device;
@@ -9984,15 +10040,12 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
 
         break;
     case GGML_OP_CONV_2D:
+    case GGML_OP_CONV_2D_DEFORM:
         ggml_vk_conv_2d(ctx, compute_ctx, src0, src1, node, dryrun);
 
         break;
     case GGML_OP_CONV_2D_DW:
         ggml_vk_conv_2d_dw(ctx, compute_ctx, src0, src1, node, dryrun);
-
-        break;
-    case GGML_OP_CONV_2D_DEFORM:
-        ggml_vk_conv_2d_deform(ctx, compute_ctx, src0, src1, src2, src3, node, dryrun);
 
         break;
     case GGML_OP_CONV_TRANSPOSE_2D:
@@ -11290,7 +11343,6 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
         case GGML_OP_IM2COL:
         case GGML_OP_TIMESTEP_EMBEDDING:
         case GGML_OP_CONV_2D_DW:
-        case GGML_OP_CONV_2D_DEFORM:
         case GGML_OP_CONV_TRANSPOSE_2D:
         case GGML_OP_POOL_2D:
         case GGML_OP_RWKV_WKV6:
@@ -11301,6 +11353,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
         case GGML_OP_CONV_TRANSPOSE_1D:
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_CONV_2D:
+        case GGML_OP_CONV_2D_DEFORM:
             {
                 // Op is disabled for Apple because it segfaults at pipeline create time on MoltenVK
                 ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;

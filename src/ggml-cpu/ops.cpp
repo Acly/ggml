@@ -7264,7 +7264,6 @@ static void ggml_compute_forward_conv_2d_deform_whcn(
     const int64_t src_h = src->ne[1];
     const int64_t knl_w = kernel->ne[0];
     const int64_t knl_h = kernel->ne[1];
-    const int64_t knl_wh = knl_w * knl_h;
     const int64_t dst_w = dst->ne[0];
     const int64_t dst_h = dst->ne[1];
 

@@ -4490,7 +4490,7 @@ struct ggml_tensor * ggml_conv_2d_deform(
         ggml_set_permuted_strides(result, 2, 0, 1, 3);
     }
 
-    int32_t params[] = { stride0, stride1, pad0, pad1 };
+    int32_t params[] = { stride0, stride1, pad0, pad1, 1, 1 };
     ggml_set_op_params(result, params, sizeof(params));
 
     result->op     = GGML_OP_CONV_2D_DEFORM;
