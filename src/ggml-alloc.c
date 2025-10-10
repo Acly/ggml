@@ -23,7 +23,7 @@ static bool ggml_is_view(const struct ggml_tensor * t) {
 }
 
 // ops that return true for this function must not use restrict pointers for their backend implementations
-static bool ggml_op_can_inplace(enum ggml_op op) {
+bool ggml_op_can_inplace(enum ggml_op op) {
     switch (op) {
         case GGML_OP_SCALE:
         case GGML_OP_DIAG_MASK_ZERO:

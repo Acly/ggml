@@ -4,8 +4,7 @@ project("ggml" C CXX ASM)
 ### GGML Version
 set(GGML_VERSION_MAJOR 0)
 set(GGML_VERSION_MINOR 9)
-set(GGML_VERSION_PATCH 2)
-set(GGML_VERSION_DEV "-dev")  # "-dev" for development, "" for releases
+set(GGML_VERSION_PATCH 4)
 set(GGML_VERSION_BASE "${GGML_VERSION_MAJOR}.${GGML_VERSION_MINOR}.${GGML_VERSION_PATCH}")
 
 find_program(GIT_EXE NAMES git git.exe NO_CMAKE_FIND_ROOT_PATH)
@@ -26,8 +25,8 @@ if(GIT_EXE)
     )
 endif()
 
-# Build the version string with optional -dev suffix and dirty flag
-set(GGML_VERSION "${GGML_VERSION_BASE}${GGML_VERSION_DEV}")
+# Build the version string with optional dirty flag
+set(GGML_VERSION "${GGML_VERSION_BASE}")
 if(GGML_GIT_DIRTY AND NOT GGML_GIT_DIRTY EQUAL 0)
     set(GGML_VERSION "${GGML_VERSION}-dirty")
 endif()
@@ -177,7 +176,7 @@ set(GGML_CPU_POWERPC_CPUTYPE "" CACHE STRING "ggml: CPU type for PowerPC")
 
 
 if (MINGW)
-    set(GGML_WIN_VER "0x602" CACHE STRING   "ggml: Windows version")
+    set(GGML_WIN_VER "0xA00" CACHE STRING   "ggml: Windows version")
 endif()
 
 # ggml core
@@ -226,7 +225,6 @@ option(GGML_WEBGPU                          "ggml: use WebGPU"                  
 option(GGML_WEBGPU_DEBUG                    "ggml: enable WebGPU debug output"                OFF)
 option(GGML_ZDNN                            "ggml: use zDNN"                                  OFF)
 option(GGML_METAL                           "ggml: use Metal"                                 ${GGML_METAL_DEFAULT})
-option(GGML_METAL_USE_BF16                  "ggml: use bfloat if available"                   OFF)
 option(GGML_METAL_NDEBUG                    "ggml: disable Metal debugging"                   OFF)
 option(GGML_METAL_SHADER_DEBUG              "ggml: compile Metal with -fno-fast-math"         OFF)
 option(GGML_METAL_EMBED_LIBRARY             "ggml: embed Metal library"                       ${GGML_METAL})
