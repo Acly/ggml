@@ -2193,7 +2193,8 @@ extern "C" {
             struct ggml_tensor  * a,
             int                   k);
 
-#define GGML_KQ_MASK_PAD 64
+// VISION: changed ahead of https://github.com/ggml-org/llama.cpp/pull/16309
+#define GGML_KQ_MASK_PAD 1
 
     // q:    [n_embd_k, n_batch,     n_head,    ne3 ]
     // k:    [n_embd_k, n_kv,        n_head_kv, ne3 ]
