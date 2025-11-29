@@ -78,11 +78,11 @@ float bicubic(float p0, float p1, float p2, float p3, float x) {
 #define FETCH(a,b) data_a[base + clamp(i.x+(a), 0, res.x) * p.nb00 + clamp(i.y+(b), 0, res.y) * p.nb01]
 
 float interpolate_bicubic(uint i10, uint i11, uint i12, uint i13) {
-    const ivec2 res = ivec2(p.ne00, p.ne01) - 1;
+    const ivec2 res = ivec2(p.ne00 - 1, p.ne01 - 1);
 
-    const vec2 c = (vec2(i10, i11) + p.pixel_offset) / vec2(p.sf0, p.sf1) - p.pixel_offset;
-    const vec2 d = fract(c);
-    const ivec2 i = ivec2(floor(c));
+    const vec2 coord = (vec2(i10, i11) + p.pixel_offset) / vec2(p.sf0, p.sf1) - p.pixel_offset;
+    const vec2 d = fract(coord);
+    const ivec2 i = ivec2(floor(coord));
 
     const uint i02 = uint(i12 / p.sf2);
     const uint i03 = uint(i13 / p.sf3);
@@ -93,7 +93,7 @@ float interpolate_bicubic(uint i10, uint i11, uint i12, uint i13) {
         bicubic(FETCH(-1, 0), FETCH(0, 0), FETCH(1, 0), FETCH(2, 0), d.x),
         bicubic(FETCH(-1, 1), FETCH(0, 1), FETCH(1, 1), FETCH(2, 1), d.x),
         bicubic(FETCH(-1, 2), FETCH(0, 2), FETCH(1, 2), FETCH(2, 2), d.x), d.y);
-}    
+}
 
 void main() {
     const uint idx = gl_GlobalInvocationID.z * 262144 + gl_GlobalInvocationID.y * 512 + gl_GlobalInvocationID.x;
